@@ -130,6 +130,8 @@ RAW_STRUCTURE_DESCRIPTION = (
     "structure, polyline, primaryLengthMetric, primaryIntensityMetric, and "
     "primaryIntensityTargetOrRange."
 )
+WORKOUT_FEELING_DESCRIPTION = "TrainingPeaks feeling value (0-10)."
+WORKOUT_RPE_DESCRIPTION = "Rating of perceived exertion (RPE), 0-10."
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +228,8 @@ TOOLS = [
                     "description": "Workout subtype ID from tp_get_workout_types",
                 },
                 "tags": {"type": "string", "description": "Optional comma-separated tags"},
-                "feeling": {"type": "integer", "description": "Feeling score 0-10"},
-                "rpe": {"type": "integer", "description": "RPE score 1-10"},
+                "feeling": {"type": "integer", "description": WORKOUT_FEELING_DESCRIPTION},
+                "rpe": {"type": "integer", "description": WORKOUT_RPE_DESCRIPTION},
             },
             "required": ["date", "sport", "title"],
         },
@@ -254,8 +256,8 @@ TOOLS = [
                 "tags": {"type": "string"},
                 "athlete_comment": {"type": "string"},
                 "coach_comment": {"type": "string"},
-                "feeling": {"type": "integer", "description": "0-10"},
-                "rpe": {"type": "integer", "description": "1-10"},
+                "feeling": {"type": "integer", "description": WORKOUT_FEELING_DESCRIPTION},
+                "rpe": {"type": "integer", "description": WORKOUT_RPE_DESCRIPTION},
                 "structure": {
                     "type": ["object", "string"],
                     "description": STRUCTURE_DESCRIPTION,
@@ -741,6 +743,14 @@ TOOLS = [
                 "distance_km": {"type": "number"},
                 "ctl_target": {"type": "number"},
                 "description": {"type": "string"},
+                "workout_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Workout IDs to attach to the event as its legs, in order "
+                        "(e.g. swim, T1, bike, T2, run). Replaces the existing list."
+                    ),
+                },
             },
             "required": ["event_id"],
         },
@@ -931,8 +941,14 @@ TOOLS = [
             "properties": {
                 "library_id": {"type": "string"},
                 "name": {"type": "string"},
-                "sport_family_id": {"type": "integer"},
-                "sport_type_id": {"type": "integer"},
+                "sport_family_id": {
+                    "type": "integer",
+                    "description": "Sport ID (e.g. 2=Bike; see tp_get_workout_types)",
+                },
+                "sport_type_id": {
+                    "type": "integer",
+                    "description": "Sport subtype ID (e.g. 3=Road Bike)",
+                },
                 "duration_hours": {"type": "number"},
                 "tss": {"type": "number"},
                 "description": {"type": "string"},
@@ -1325,7 +1341,7 @@ async def _h_update_event(args):
         event_id=args["event_id"], name=args.get("name"), date=args.get("date"),
         event_type=args.get("event_type"), priority=args.get("priority"),
         distance_km=args.get("distance_km"), ctl_target=args.get("ctl_target"),
-        description=args.get("description"),
+        description=args.get("description"), workout_ids=args.get("workout_ids"),
     )
 
 @_handler("tp_delete_event")
