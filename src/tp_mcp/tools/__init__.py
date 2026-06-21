@@ -37,6 +37,7 @@ from tp_mcp.tools.library import (
     tp_get_library_item,
     tp_get_library_items,
     tp_schedule_library_workout,
+    tp_search_exercises,
     tp_update_library_item,
 )
 from tp_mcp.tools.metrics import tp_get_metrics, tp_get_nutrition, tp_log_metrics
@@ -129,6 +130,7 @@ __all__ = [
     "tp_refresh_auth",
     "tp_reorder_workouts",
     "tp_schedule_library_workout",
+    "tp_search_exercises",
     "tp_set_workout_note",
     "tp_unpair_workout",
     "tp_update_equipment",

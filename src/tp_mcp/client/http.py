@@ -416,17 +416,23 @@ class TPClient:
             message=f"API error: {response.status_code}",
         )
 
-    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> APIResponse:
+    async def get(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+        base_url: str | None = None,
+    ) -> APIResponse:
         """Make a GET request.
 
         Args:
             endpoint: API endpoint.
             params: Query parameters.
+            base_url: Optional base URL override for endpoints not on the default host.
 
         Returns:
             APIResponse.
         """
-        return await self._request("GET", endpoint, params=params)
+        return await self._request("GET", endpoint, params=params, base_url=base_url)
 
     async def post(
         self,

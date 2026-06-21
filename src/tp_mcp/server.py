@@ -69,6 +69,7 @@ from tp_mcp.tools import (
     tp_refresh_auth,
     tp_reorder_workouts,
     tp_schedule_library_workout,
+    tp_search_exercises,
     tp_set_workout_note,
     tp_unpair_workout,
     tp_update_equipment,
@@ -988,6 +989,22 @@ TOOLS = [
         },
     ),
     Tool(
+        name="tp_search_exercises",
+        description=(
+            "Search the TrainingPeaks strength exercise catalog by title "
+            "(case-insensitive substring). Returns matching exercises with "
+            "id and title so coaches can find exercise IDs for "
+            "tp_create_strength_workout."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
         name="tp_create_strength_workout",
         description=(
             "Create a structured strength workout on a calendar date. "
@@ -1013,6 +1030,29 @@ TOOLS = [
                             },
                             "title": {"type": "string"},
                             "coachNotes": {"type": ["string", "null"]},
+                            "parameters": {
+                                "type": "array",
+                                "description": (
+                                    "Block-level parameters (e.g. TimeSeconds "
+                                    "on WarmUp/CoolDown). SingleExercise blocks "
+                                    "should omit or pass []."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "parameter": {"type": "string"},
+                                        "value": {
+                                            "type": [
+                                                "number",
+                                                "integer",
+                                                "string",
+                                                "null",
+                                            ]
+                                        },
+                                    },
+                                    "required": ["parameter"],
+                                },
+                            },
                             "exercises": {
                                 "type": "array",
                                 "items": {
@@ -1438,6 +1478,10 @@ async def _h_schedule_lib(args):
     return await tp_schedule_library_workout(
         library_id=args["library_id"], item_id=args["item_id"], date=args["date"],
     )
+
+@_handler("tp_search_exercises")
+async def _h_search_exercises(args):
+    return await tp_search_exercises(query=args["query"])
 
 @_handler("tp_create_strength_workout")
 async def _h_create_strength(args):
