@@ -101,7 +101,8 @@ server = Server("trainingpeaks-mcp")
 STRUCTURE_DESCRIPTION = (
     "Interval structure as a JSON object or string."
     ' Format: {"steps": [...], "primaryIntensityMetric":'
-    ' "percentOfFtp"|"percentOfThresholdHr"|"percentOfThresholdPace"}.'
+    ' "percentOfFtp"|"percentOfThresholdHr"|"percentOfThresholdPace"'
+    '|"percentOfMaxHr"|"rpe"}.'
     " Each step is either a single interval or a repetition block."
     ' SINGLE STEP: {"name": "Endurance", "duration_seconds": 1200,'
     ' "intensity_min": 65, "intensity_max": 75,'

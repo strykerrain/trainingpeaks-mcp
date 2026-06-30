@@ -19,7 +19,13 @@ logger = logging.getLogger("tp-mcp")
 INTENSITY_CLASSES = {"warmUp", "active", "rest", "coolDown", "other"}
 
 # Valid primary intensity metrics
-INTENSITY_METRICS = {"percentOfFtp", "percentOfThresholdHr", "percentOfThresholdPace"}
+INTENSITY_METRICS = {
+    "percentOfFtp",
+    "percentOfThresholdHr",
+    "percentOfThresholdPace",
+    "percentOfMaxHr",
+    "rpe",
+}
 
 
 class SimpleStep(BaseModel):
