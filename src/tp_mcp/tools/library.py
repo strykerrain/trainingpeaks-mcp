@@ -12,6 +12,8 @@ from tp_mcp.tools._validation import WorkoutIdInput, format_validation_error
 
 logger = logging.getLogger("tp-mcp")
 
+RX_API_BASE = "https://api.peakswaresb.com"
+
 
 async def tp_get_libraries() -> dict[str, Any]:
     """List all workout library folders.
