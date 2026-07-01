@@ -144,7 +144,7 @@ class SimpleWorkoutStructure(BaseModel):
 def _step_length_dict(step: SimpleStep) -> dict[str, Any]:
     """Length descriptor for a step's wire form (distance-first, else seconds)."""
     if step.distance_value is not None and step.distance_unit is not None:
-        return {"value": step.distance_value, "unit": step.distance_unit}
+        return {"value": _num(step.distance_value), "unit": step.distance_unit}
     return {"value": step.duration_seconds, "unit": "second"}
 
 
@@ -298,8 +298,6 @@ def _build_wire_structure_distance(structure: SimpleWorkoutStructure) -> dict[st
     wire_blocks: list[dict[str, Any]] = []
     cumulative: float = 0.0
 
-    total_distance = sum(_compute_block_distance(b) for b in structure.steps)
-
     for block in structure.steps:
         block_len = _compute_block_distance(block)
         begin = cumulative
@@ -327,34 +325,10 @@ def _build_wire_structure_distance(structure: SimpleWorkoutStructure) -> dict[st
         wire_blocks.append(wire_block)
         cumulative = end
 
-    # Polyline over cumulative distance; time-only rest steps contribute nothing.
-    polyline: list[list[float]] = []
-    poly_cumulative: float = 0.0
-    for block in structure.steps:
-        if isinstance(block, SimpleRepetitionBlock):
-            for _rep in range(block.reps):
-                for s in block.steps:
-                    step_len = _step_distance_len(s)
-                    if step_len == 0:
-                        continue
-                    t_start = poly_cumulative / total_distance if total_distance > 0 else 0
-                    poly_cumulative += step_len
-                    t_end = poly_cumulative / total_distance if total_distance > 0 else 0
-                    intensity = s.intensity_max / 100.0
-                    _polyline_bar(t_start, t_end, intensity, polyline)
-        else:
-            step_len = _step_distance_len(block)
-            if step_len == 0:
-                continue
-            t_start = poly_cumulative / total_distance if total_distance > 0 else 0
-            poly_cumulative += step_len
-            t_end = poly_cumulative / total_distance if total_distance > 0 else 0
-            intensity = block.intensity_max / 100.0
-            _polyline_bar(t_start, t_end, intensity, polyline)
-
+    # No polyline in distance mode — TP generates its own for distance workouts;
+    # a normalized version confuses the renderer.
     return {
         "structure": wire_blocks,
-        "polyline": polyline,
         "primaryLengthMetric": "distance",
         "primaryIntensityMetric": structure.primaryIntensityMetric,
         "primaryIntensityTargetOrRange": "range",
