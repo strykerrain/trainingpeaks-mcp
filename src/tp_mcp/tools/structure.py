@@ -7,7 +7,7 @@ and polyline generation.
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -27,13 +27,24 @@ INTENSITY_METRICS = {
     "rpe",
 }
 
+# Valid distance units for distance-based workouts (e.g. swim intervals)
+DISTANCE_UNITS = {"meter", "yard", "km", "mile"}
+
 
 class SimpleStep(BaseModel):
-    """A single workout step in the simplified input format."""
+    """A single workout step in the simplified input format.
+
+    Each step must specify EITHER ``duration_seconds`` (time-based) OR
+    both ``distance_value`` and ``distance_unit`` (distance-based, e.g.
+    swim intervals). Rest steps inside a distance-based workout may still
+    use ``duration_seconds`` (e.g. 10-second recoveries).
+    """
 
     name: str = Field(min_length=1, max_length=100)
     type: str = Field(default="step")
-    duration_seconds: int = Field(gt=0, le=86400)
+    duration_seconds: int | None = Field(default=None, gt=0, le=86400)
+    distance_value: float | None = Field(default=None, gt=0, le=1_000_000)
+    distance_unit: str | None = Field(default=None)
     intensity_min: float = Field(ge=0, le=300)
     intensity_max: float = Field(ge=0, le=300)
     intensityClass: str = Field(default="active")  # noqa: N815
@@ -47,6 +58,33 @@ class SimpleStep(BaseModel):
             valid = ", ".join(sorted(INTENSITY_CLASSES))
             raise ValueError(f"Invalid intensityClass '{v}'. Valid: {valid}")
         return v
+
+    @field_validator("distance_unit")
+    @classmethod
+    def check_distance_unit(cls, v: str | None) -> str | None:
+        if v is not None and v not in DISTANCE_UNITS:
+            valid = ", ".join(sorted(DISTANCE_UNITS))
+            raise ValueError(f"Invalid distance_unit '{v}'. Valid: {valid}")
+        return v
+
+    @model_validator(mode="after")
+    def check_length_specification(self) -> "SimpleStep":
+        has_duration = self.duration_seconds is not None
+        has_distance = self.distance_value is not None and self.distance_unit is not None
+        partial_distance = (self.distance_value is None) ^ (self.distance_unit is None)
+        if partial_distance:
+            raise ValueError(
+                "distance_value and distance_unit must be provided together"
+            )
+        if has_duration and has_distance:
+            raise ValueError(
+                "Provide either duration_seconds or (distance_value + distance_unit), not both"
+            )
+        if not has_duration and not has_distance:
+            raise ValueError(
+                "Each step must specify either duration_seconds or (distance_value + distance_unit)"
+            )
+        return self
 
     @model_validator(mode="after")
     def check_intensity_range(self) -> "SimpleStep":
@@ -74,6 +112,8 @@ class SimpleWorkoutStructure(BaseModel):
     """Top-level simplified structure input from the LLM."""
 
     primaryIntensityMetric: str = Field(default="percentOfFtp")  # noqa: N815
+    primaryLengthMetric: Literal["duration", "distance"] = "duration"  # noqa: N815
+    distance_unit: str | None = Field(default=None)
     steps: list[SimpleStep | SimpleRepetitionBlock] = Field(min_length=1)
 
     @field_validator("primaryIntensityMetric")
@@ -83,6 +123,49 @@ class SimpleWorkoutStructure(BaseModel):
             valid = ", ".join(sorted(INTENSITY_METRICS))
             raise ValueError(f"Invalid primaryIntensityMetric '{v}'. Valid: {valid}")
         return v
+
+    @field_validator("distance_unit")
+    @classmethod
+    def check_top_distance_unit(cls, v: str | None) -> str | None:
+        if v is not None and v not in DISTANCE_UNITS:
+            valid = ", ".join(sorted(DISTANCE_UNITS))
+            raise ValueError(f"Invalid distance_unit '{v}'. Valid: {valid}")
+        return v
+
+    @model_validator(mode="after")
+    def check_distance_config(self) -> "SimpleWorkoutStructure":
+        if self.primaryLengthMetric == "distance" and not self.distance_unit:
+            raise ValueError(
+                "distance_unit is required when primaryLengthMetric is 'distance'"
+            )
+        return self
+
+
+def _step_length_dict(step: SimpleStep) -> dict[str, Any]:
+    """Length descriptor for a step's wire form (distance-first, else seconds)."""
+    if step.distance_value is not None and step.distance_unit is not None:
+        return {"value": step.distance_value, "unit": step.distance_unit}
+    return {"value": step.duration_seconds, "unit": "second"}
+
+
+def _step_distance_len(step: SimpleStep) -> float:
+    """Distance contribution of a step in its native unit; 0 for time-only rest steps."""
+    if step.distance_value is not None and step.distance_unit is not None:
+        return float(step.distance_value)
+    return 0.0
+
+
+def _compute_block_distance(block: SimpleStep | SimpleRepetitionBlock) -> float:
+    """Total distance contribution of a block for distance-based workouts."""
+    if isinstance(block, SimpleRepetitionBlock):
+        inner = sum(_step_distance_len(s) for s in block.steps)
+        return inner * block.reps
+    return _step_distance_len(block)
+
+
+def _num(v: float) -> int | float:
+    """Return int if v is whole, else float — matches TP payload style."""
+    return int(v) if v == int(v) else v
 
 
 def _build_step_wire(step: SimpleStep) -> dict[str, Any]:
@@ -102,7 +185,7 @@ def _build_step_wire(step: SimpleStep) -> dict[str, Any]:
     return {
         "name": step.name,
         "type": "step",
-        "length": {"value": step.duration_seconds, "unit": "second"},
+        "length": _step_length_dict(step),
         "targets": targets,
         "intensityClass": step.intensityClass,
         "openDuration": False,
@@ -112,9 +195,9 @@ def _build_step_wire(step: SimpleStep) -> dict[str, Any]:
 def _compute_block_duration(block: SimpleStep | SimpleRepetitionBlock) -> int:
     """Compute total duration of a block in seconds."""
     if isinstance(block, SimpleRepetitionBlock):
-        inner_duration = sum(s.duration_seconds for s in block.steps)
+        inner_duration = sum((s.duration_seconds or 0) for s in block.steps)
         return inner_duration * block.reps
-    return block.duration_seconds
+    return block.duration_seconds or 0
 
 
 def _polyline_bar(
@@ -139,6 +222,12 @@ def build_wire_structure(structure: SimpleWorkoutStructure) -> dict[str, Any]:
     Returns:
         Dict matching the TP API structure format.
     """
+    if structure.primaryLengthMetric == "distance":
+        return _build_wire_structure_distance(structure)
+    return _build_wire_structure_duration(structure)
+
+
+def _build_wire_structure_duration(structure: SimpleWorkoutStructure) -> dict[str, Any]:
     wire_blocks: list[dict[str, Any]] = []
     cumulative_seconds = 0
 
@@ -185,13 +274,13 @@ def build_wire_structure(structure: SimpleWorkoutStructure) -> dict[str, Any]:
             for _rep in range(block.reps):
                 for s in block.steps:
                     t_start = poly_cumulative / total_duration if total_duration > 0 else 0
-                    poly_cumulative += s.duration_seconds
+                    poly_cumulative += (s.duration_seconds or 0)
                     t_end = poly_cumulative / total_duration if total_duration > 0 else 0
                     intensity = s.intensity_max / 100.0
                     _polyline_bar(t_start, t_end, intensity, polyline)
         else:
             t_start = poly_cumulative / total_duration if total_duration > 0 else 0
-            poly_cumulative += block.duration_seconds
+            poly_cumulative += (block.duration_seconds or 0)
             t_end = poly_cumulative / total_duration if total_duration > 0 else 0
             intensity = block.intensity_max / 100.0
             _polyline_bar(t_start, t_end, intensity, polyline)
@@ -202,6 +291,74 @@ def build_wire_structure(structure: SimpleWorkoutStructure) -> dict[str, Any]:
         "primaryLengthMetric": "duration",
         "primaryIntensityMetric": structure.primaryIntensityMetric,
         "primaryIntensityTargetOrRange": "range",
+    }
+
+
+def _build_wire_structure_distance(structure: SimpleWorkoutStructure) -> dict[str, Any]:
+    wire_blocks: list[dict[str, Any]] = []
+    cumulative: float = 0.0
+
+    total_distance = sum(_compute_block_distance(b) for b in structure.steps)
+
+    for block in structure.steps:
+        block_len = _compute_block_distance(block)
+        begin = cumulative
+        end = cumulative + block_len
+
+        if isinstance(block, SimpleRepetitionBlock):
+            inner_steps = [_build_step_wire(s) for s in block.steps]
+            wire_block: dict[str, Any] = {
+                "type": "repetition",
+                "length": {"value": block.reps, "unit": "repetition"},
+                "steps": inner_steps,
+                "begin": _num(begin),
+                "end": _num(end),
+            }
+        else:
+            # Single step — outer wrapper length mirrors the inner step per TP payloads.
+            wire_step = _build_step_wire(block)
+            wire_block = {
+                "type": "step",
+                "length": _step_length_dict(block),
+                "steps": [wire_step],
+                "begin": _num(begin),
+                "end": _num(end),
+            }
+        wire_blocks.append(wire_block)
+        cumulative = end
+
+    # Polyline over cumulative distance; time-only rest steps contribute nothing.
+    polyline: list[list[float]] = []
+    poly_cumulative: float = 0.0
+    for block in structure.steps:
+        if isinstance(block, SimpleRepetitionBlock):
+            for _rep in range(block.reps):
+                for s in block.steps:
+                    step_len = _step_distance_len(s)
+                    if step_len == 0:
+                        continue
+                    t_start = poly_cumulative / total_distance if total_distance > 0 else 0
+                    poly_cumulative += step_len
+                    t_end = poly_cumulative / total_distance if total_distance > 0 else 0
+                    intensity = s.intensity_max / 100.0
+                    _polyline_bar(t_start, t_end, intensity, polyline)
+        else:
+            step_len = _step_distance_len(block)
+            if step_len == 0:
+                continue
+            t_start = poly_cumulative / total_distance if total_distance > 0 else 0
+            poly_cumulative += step_len
+            t_end = poly_cumulative / total_distance if total_distance > 0 else 0
+            intensity = block.intensity_max / 100.0
+            _polyline_bar(t_start, t_end, intensity, polyline)
+
+    return {
+        "structure": wire_blocks,
+        "polyline": polyline,
+        "primaryLengthMetric": "distance",
+        "primaryIntensityMetric": structure.primaryIntensityMetric,
+        "primaryIntensityTargetOrRange": "range",
+        "visualizationDistanceUnit": structure.distance_unit,
     }
 
 
@@ -225,13 +382,19 @@ def compute_if_tss(structure: SimpleWorkoutStructure) -> tuple[float, float, int
         if isinstance(block, SimpleRepetitionBlock):
             for _rep in range(block.reps):
                 for step in block.steps:
+                    dur = step.duration_seconds or 0
+                    if dur == 0:
+                        continue
                     midpoint = (step.intensity_min + step.intensity_max) / 2.0
-                    weighted_sum += step.duration_seconds * (midpoint ** 4)
-                    total_seconds += step.duration_seconds
+                    weighted_sum += dur * (midpoint ** 4)
+                    total_seconds += dur
         else:
+            dur = block.duration_seconds or 0
+            if dur == 0:
+                continue
             midpoint = (block.intensity_min + block.intensity_max) / 2.0
-            weighted_sum += block.duration_seconds * (midpoint ** 4)
-            total_seconds += block.duration_seconds
+            weighted_sum += dur * (midpoint ** 4)
+            total_seconds += dur
 
     if total_seconds == 0:
         return 0.0, 0.0, 0
@@ -275,6 +438,8 @@ def parse_structure_input(structure_input: dict[str, Any] | str) -> SimpleWorkou
 
     return SimpleWorkoutStructure(
         primaryIntensityMetric=data.get("primaryIntensityMetric", "percentOfFtp"),
+        primaryLengthMetric=data.get("primaryLengthMetric", "duration"),
+        distance_unit=data.get("distance_unit"),
         steps=parsed_steps,
     )
 

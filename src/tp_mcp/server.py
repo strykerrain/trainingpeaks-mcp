@@ -125,6 +125,11 @@ STRUCTURE_DESCRIPTION = (
     " rest (all recovery), coolDown, other."
     " Intensity values are % of threshold (FTP/HR/pace)."
     " Optional per-step: cadence_min, cadence_max (rpm)."
+    " DISTANCE-BASED (swim/track): set primaryLengthMetric=\"distance\""
+    " and distance_unit (meter|yard|km|mile) at the top level;"
+    " each step then uses distance_value + distance_unit instead of"
+    " duration_seconds. Rest steps inside a distance workout may still"
+    " use duration_seconds (e.g. 10-second recoveries)."
 )
 RAW_STRUCTURE_DESCRIPTION = (
     "Native TrainingPeaks structured workout payload in builder format. "
