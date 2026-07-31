@@ -8,7 +8,7 @@ Orientation for AI agents working in this repository.
 [JamsusMaximus/trainingpeaks-mcp](https://github.com/JamsusMaximus/trainingpeaks-mcp) — a Python
 MCP (Model Context Protocol) server that exposes the TrainingPeaks web API as tools an AI
 assistant can call. Package name is `tp-mcp` (see `pyproject.toml`), source lives under
-`src/tp_mcp/`, and the server registers **65 tools** in `src/tp_mcp/server.py`.
+`src/tp_mcp/`, and the server registers **67 tools** (verified at runtime via `tools/list`) in `src/tp_mcp/server.py`.
 
 Owner of this fork: **Erik Hurley**, head coach of Earned Ground Coaching. The fork exists to
 serve a real coaching workflow, so changes here are judged by whether they make athlete
