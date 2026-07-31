@@ -159,10 +159,26 @@ and mock `httpx` — nothing in the suite touches the TrainingPeaks API.
 ## Known open item
 
 Upstream **PR #115** by `evilbruce666` (Alexey Kalinin), *"feat(strength): structured
-strength/gym workouts via Peaksware API"*, is **merged upstream but not synced into this fork**.
-It adds the strength exercise catalogue (exercise search) and strength workout create/delete
-support. The tools it introduces do not exist in `src/tp_mcp/tools/` here.
+strength/gym workouts via Peaksware API"*, is **merged upstream but not merged into this fork**.
 
-This is **deferred, not rejected**. If strength-workout tools are needed, the work is to merge
-`upstream/main` (or cherry-pick that PR) and re-run the full check suite — expect conflicts in
-`server.py`'s tool registry and in `tools/__init__.py`.
+**This is not a straightforward sync.** This fork already implements the same feature
+independently:
+
+| Tool | Defined in | Added |
+| --- | --- | --- |
+| `tp_search_exercises` | `src/tp_mcp/tools/library.py:695` | `85f94a9` (2026-06-10) |
+| `tp_create_strength_workout` | `src/tp_mcp/tools/library.py:1075` | `85f94a9` (2026-06-10) |
+
+Both are registered in `server.py` and exported from `tools/__init__.py`, and both appear in
+the live `tools/list` handshake. `7280262` (2026-06-10) recorded a render crash in the
+exercise object, and `dbf1e01` (2026-06-30) added the missing `RX_API_BASE` constant; no
+WIP or TODO markers remain in `library.py`.
+
+So merging `upstream/main` means **reconciling two competing implementations of the same
+feature**, not resolving a tool-registry conflict. Before doing it, decide which
+implementation wins. If upstream's is better, this fork's version and its tests come out;
+if this fork's is better, PR #115 needs to be excluded from the merge rather than
+mechanically resolved.
+
+Upstream may also carry a strength-workout **delete** path that this fork lacks — that has
+not been verified against the PR diff.
