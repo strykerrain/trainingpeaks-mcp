@@ -8,7 +8,15 @@ Orientation for AI agents working in this repository.
 [JamsusMaximus/trainingpeaks-mcp](https://github.com/JamsusMaximus/trainingpeaks-mcp) — a Python
 MCP (Model Context Protocol) server that exposes the TrainingPeaks web API as tools an AI
 assistant can call. Package name is `tp-mcp` (see `pyproject.toml`), source lives under
-`src/tp_mcp/`, and the server registers **67 tools** (verified at runtime via `tools/list`) in `src/tp_mcp/server.py`.
+`src/tp_mcp/`, and the server registers tools in `src/tp_mcp/server.py`. **The count depends on the
+branch** — see [Branch divergence](#branch-divergence) before quoting a number:
+
+| Branch | Registered tools | Read / write |
+| --- | --- | --- |
+| `main` (default) | **65** | 31 / 34 |
+| `develop` (what actually runs) | **67** | 32 / 35 |
+
+`README.md` says "Tools (64)" on both branches; it is stale on both.
 
 This fork is maintained to support a working endurance-coaching practice. The fork exists to
 serve a real coaching workflow, so changes here are judged by whether they make athlete
@@ -156,29 +164,44 @@ worktree's `src/` before invoking pytest, or the suite will silently test the ot
 Tests live in `tests/` mirroring the package layout (`test_auth/`, `test_client/`, `test_tools/`)
 and mock `httpx` — nothing in the suite touches the TrainingPeaks API.
 
+## Branch divergence
+
+`main` is the default branch on GitHub, but **`develop` is the branch that actually
+runs.** The user-level `trainingpeaks` MCP entry points at an editable install
+(`_editable_impl_tp_mcp.pth` → `src`) in a checkout that sits on `develop`, so a live
+`tools/list` handshake reports *develop's* tool set regardless of what `main` contains.
+
+At the time of writing `develop` is **17 commits ahead of and 3 behind** `main`, across
+19 files. Two practical consequences:
+
+- **A runtime handshake cannot answer a question about `main`.** Check out the branch you
+  mean, or read the file at an explicit ref.
+- **Anything documented here about tool availability is branch-specific.** State the branch.
+
 ## Known open item
 
 Upstream **PR #115** by `evilbruce666` (Alexey Kalinin), *"feat(strength): structured
-strength/gym workouts via Peaksware API"*, is **merged upstream but not merged into this fork**.
+strength/gym workouts via Peaksware API"*, is **merged upstream but not merged into this
+fork**.
 
-**This is not a straightforward sync.** This fork already implements the same feature
-independently:
+**This is not a straightforward sync.** This fork has an independent implementation of the
+same feature — but it is **on `develop` only, and absent from `main`**:
 
-| Tool | Defined in | Added |
-| --- | --- | --- |
-| `tp_search_exercises` | `src/tp_mcp/tools/library.py:695` | `85f94a9` (2026-06-10) |
-| `tp_create_strength_workout` | `src/tp_mcp/tools/library.py:1075` | `85f94a9` (2026-06-10) |
+| Tool | Branch | Defined in | Added |
+| --- | --- | --- | --- |
+| `tp_search_exercises` | `develop` only | `src/tp_mcp/tools/library.py` | `85f94a9` (2026-06-10) |
+| `tp_create_strength_workout` | `develop` only | `src/tp_mcp/tools/library.py` | `85f94a9` (2026-06-10) |
 
-Both are registered in `server.py` and exported from `tools/__init__.py`, and both appear in
-the live `tools/list` handshake. `7280262` (2026-06-10) recorded a render crash in the
-exercise object, and `dbf1e01` (2026-06-30) added the missing `RX_API_BASE` constant; no
-WIP or TODO markers remain in `library.py`.
+On `main`, both are absent from `tools/library.py` and `tools/__init__.py` has zero
+references to either. `git branch --contains 85f94a9` returns `develop` only. `7280262`
+(2026-06-10) recorded a render crash in the exercise object and `dbf1e01` (2026-06-30)
+added the missing `RX_API_BASE` constant; no WIP or TODO markers remain in `library.py`
+on `develop`.
 
-So merging `upstream/main` means **reconciling two competing implementations of the same
-feature**, not resolving a tool-registry conflict. Before doing it, decide which
-implementation wins. If upstream's is better, this fork's version and its tests come out;
-if this fork's is better, PR #115 needs to be excluded from the merge rather than
-mechanically resolved.
+So the strength work is **doubly unmerged**: divergent from upstream *and* not on this
+fork's default branch. Before merging `upstream/main`, decide which implementation wins.
+Resolving those conflicts mechanically would silently pick one.
 
-Upstream may also carry a strength-workout **delete** path that this fork lacks — that has
-not been verified against the PR diff.
+Upstream may also carry a strength-workout **delete** path that this fork lacks — not
+verified against the PR diff.
+
