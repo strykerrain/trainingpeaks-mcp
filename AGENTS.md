@@ -172,7 +172,31 @@ runs.** The user-level `trainingpeaks` MCP entry points at an editable install
 `tools/list` handshake reports *develop's* tool set regardless of what `main` contains.
 
 At the time of writing `develop` is **17 commits ahead of and 3 behind** `main`, across
-19 files. Two practical consequences:
+19 files — but that framing understates it. **The divergence is not symmetric.**
+
+The 3 commits `main` has that `develop` lacks are `f5b633e`, `9a04a1f` and `fe0797e` —
+all dated 2026-07-31, all touching **only this file** (`AGENTS.md`, +168/-0). No product
+code.
+
+The 17 commits `develop` has that `main` lacks span **2026-06-11 to 2026-07-01** and are
+all real work:
+
+| Area | Examples |
+| --- | --- |
+| Workout structure | distance-based intervals for **swim** workouts (`d114624`), `percentOfMaxHr` + `rpe` as valid `primaryIntensityMetric` values confirmed against a live capture (`9d2036f`), int coercion for distance (`6aec27a`) |
+| Coach mode | `isHidden` on workout create/update so a workout can be hidden from the athlete (`cfba0c3`) |
+| Events | attach workouts to an event via `tp_update_event(workout_ids=…)` (`1751543`) |
+| Library | `tp_create_library` payload fix, listing fields, workout type on update, broken schedule endpoint (`4d34048`, `adad0c3`, `16a122f`) |
+| Strength | `tp_create_strength_workout`, render-crash fix, `RX_API_BASE` (`85f94a9`, `9246f31`, `dbf1e01`) |
+
+Roughly **+1,400 lines of tests** come with it (`test_library.py` alone is +1027).
+
+So `main` is not a peer of `develop` — it is **about a month stale on product code**.
+Anyone cloning this repo fresh gets `main` and silently loses swim distance intervals,
+coach-mode hiding, strength workouts and the library fixes. The local checkout is on
+`develop`, so the running server has them; a new clone would not.
+
+Practical consequences:
 
 - **A runtime handshake cannot answer a question about `main`.** Check out the branch you
   mean, or read the file at an explicit ref.
