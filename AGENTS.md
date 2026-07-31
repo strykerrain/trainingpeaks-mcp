@@ -10,7 +10,7 @@ MCP (Model Context Protocol) server that exposes the TrainingPeaks web API as to
 assistant can call. Package name is `tp-mcp` (see `pyproject.toml`), source lives under
 `src/tp_mcp/`, and the server registers **67 tools** (verified at runtime via `tools/list`) in `src/tp_mcp/server.py`.
 
-Owner of this fork: **Erik Hurley**, head coach of Earned Ground Coaching. The fork exists to
+This fork is maintained to support a working endurance-coaching practice. The fork exists to
 serve a real coaching workflow, so changes here are judged by whether they make athlete
 planning and analysis work reliably — not by parity with upstream.
 
@@ -22,23 +22,29 @@ Remotes in a normal clone:
 ## How it is consumed
 
 This is **not an end-user app**. It is a dependency of Erik's coaching workflow, registered
-user-level in `~/.copilot/mcp-config.json` (Windows: `C:\Users\erikh\.copilot\mcp-config.json`)
+user-level in `~/.copilot/mcp-config.json`
 as the `trainingpeaks` server:
 
 ```json
 "trainingpeaks": {
   "tools": ["*"],
   "type": "local",
-  "command": "C:\\Users\\erikh\\trainingpeaks-mcp\\.venv\\Scripts\\tp-mcp.exe",
+  "command": "C:\\Users\\<you>\\trainingpeaks-mcp\\.venv\\Scripts\\tp-mcp.exe",
   "args": ["serve"]
 }
 ```
 
 Because registration is user-level, the server is available in **every** Copilot session
 regardless of the repo that session is in. The binary points at the **main checkout**
-(`C:\Users\erikh\trainingpeaks-mcp`), not at a worktree — editing code in a worktree does not
+(`C:\Users\<you>\trainingpeaks-mcp`), not at a worktree — editing code in a worktree does not
 change the running server until the change lands on the checked-out branch of the main clone
 and the MCP server restarts.
+
+## Privacy note
+
+**This repository is public.** Account names, athlete IDs, absolute local paths, and
+anything else identifying belong in the maintainer's private notes, not here.
+Placeholders below are deliberate — do not fill them in.
 
 ## Auth model
 
@@ -47,8 +53,8 @@ TrainingPeaks browser session and stored in the OS keyring (Windows Credential M
 keyring is available, `src/tp_mcp/auth/` falls back to an encrypted file. The cookie is never
 returned to the model; the TrainingPeaks domain is hardcoded in `src/tp_mcp/auth/browser.py`.
 
-- Account: `coach@earnedgroundcoaching.com`
-- Coach athlete ID: `6408368`
+- Account: `<your TrainingPeaks coach account>`
+- Coach athlete ID: `<your coach athlete ID>`
 - Re-auth: `tp-mcp.exe auth --from-browser auto`
 - Local check: `tp-mcp.exe auth-status`
 - Clear stored cookie: `tp-mcp.exe auth-clear`
@@ -73,7 +79,7 @@ to resolve the target athlete, and **skips its class-level cache whenever an ove
 
 Consequences for anyone editing this code:
 
-- Omitting `athlete` targets the coach's own calendar (athlete ID 6408368), not an athlete's.
+- Omitting `athlete` targets the coach's own calendar (athlete ID <your coach athlete ID>), not an athlete's.
 - Never cache athlete-scoped results at class level without checking `athlete_override.get()`.
 - The contextvar is per-tool-call. Don't leak it across awaits outside the handler.
 
