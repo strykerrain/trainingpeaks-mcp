@@ -335,7 +335,14 @@ class TPClient:
             if response.status_code == 401 and _retry_on_401:
                 # Token might have expired mid-request, clear and retry once
                 self._token_cache.clear()
-                return await self._request(method, endpoint, json=json, params=params, base_url=base_url, _retry_on_401=False)
+                return await self._request(
+                    method,
+                    endpoint,
+                    json=json,
+                    params=params,
+                    base_url=base_url,
+                    _retry_on_401=False,
+                )
 
             return self._handle_response(response)
 
