@@ -4,17 +4,15 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tp_mcp.client.http import APIResponse, ErrorCode
+from tp_mcp.client.context import athlete_override
+from tp_mcp.client.http import APIResponse
 from tp_mcp.tools.library import (
-    get_exercise_params,
     tp_create_library,
     tp_create_library_item,
-    tp_create_strength_workout,
     tp_delete_library,
     tp_get_libraries,
     tp_get_library_items,
     tp_schedule_library_workout,
-    tp_search_exercises,
     tp_update_library_item,
 )
 
@@ -135,6 +133,121 @@ class TestCreateLibraryItem:
         assert "workoutTypeFamilyId" not in payload
         assert "workoutTypeValueId" not in payload
 
+    @pytest.mark.asyncio
+    async def test_create_backfills_polyline_and_range(self):
+        """A native structure without preview fields gets polyline +
+        primaryIntensityTargetOrRange so TP renders the thumbnail."""
+        def _block(begin, end, dur, lo, hi, cls):
+            return {
+                "type": "step", "length": {"value": 1, "unit": "repetition"},
+                "begin": begin, "end": end,
+                "steps": [{
+                    "name": cls, "length": {"value": dur, "unit": "second"},
+                    "targets": [{"minValue": lo, "maxValue": hi}],
+                    "intensityClass": cls,
+                }],
+            }
+        structure = {
+            "primaryIntensityMetric": "percentOfFtp",
+            "primaryLengthMetric": "duration",
+            "structure": [
+                _block(0, 300, 300, 50, 60, "warmUp"),
+                _block(300, 3300, 3000, 65, 72, "active"),
+                _block(3300, 3600, 300, 50, 55, "coolDown"),
+            ],
+        }
+        response = APIResponse(success=True, data={"exerciseLibraryItemId": 21})
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_create_library_item(
+                library_id="1", name="Endurance",
+                sport_family_id=2, sport_type_id=2, structure=structure,
+            )
+
+        assert result["success"] is True
+        st = mock_instance.post.call_args[1]["json"]["structure"]
+        assert st["primaryIntensityTargetOrRange"] == "range"
+        # 3 single-step blocks → 3 bars × 4 points
+        assert len(st["polyline"]) == 12
+        # normalised so the structure's peak target (active 72) = 1.0;
+        # warm-up 60 → 60/72 = 0.8333. Nothing exceeds 1.0.
+        assert [0.0833, 1.0] in st["polyline"]
+        assert [0.0, 0.8333] in st["polyline"]
+        assert all(p[1] <= 1.0 for p in st["polyline"])
+
+
+class TestStructurePreviewHelper:
+    def test_polyline_expands_repetition_and_normalises(self):
+        from tp_mcp.tools.library import _compute_native_polyline
+        blocks = [
+            {"type": "step", "length": {"value": 1, "unit": "repetition"},
+             "steps": [{"length": {"value": 2000, "unit": "meter"},
+                        "targets": [{"minValue": 70, "maxValue": 80}]}]},
+            {"type": "repetition", "length": {"value": 6, "unit": "repetition"},
+             "steps": [
+                 {"length": {"value": 800, "unit": "meter"},
+                  "targets": [{"minValue": 102, "maxValue": 104}]},
+                 {"length": {"value": 400, "unit": "meter"},
+                  "targets": [{"minValue": 70, "maxValue": 75}]},
+             ]},
+        ]
+        poly = _compute_native_polyline(blocks)
+        # warmup bar + 6×(work+rest) bars = 13 bars × 4 points
+        assert len(poly) == 13 * 4
+        # normalised: the peak target (work 104) = 1.0 and nothing exceeds it
+        assert any(pt[1] == 1.0 for pt in poly)
+        assert all(pt[1] <= 1.0 for pt in poly)
+
+    def test_polyline_absolute_targets_stay_in_unit_range(self):
+        """Absolute watts must normalise to [0,1], not the old /100 (300 W → 3.0)."""
+        from tp_mcp.tools.library import _compute_native_polyline
+        blocks = [
+            {"type": "step", "length": {"value": 1, "unit": "repetition"},
+             "steps": [{"length": {"value": 600, "unit": "second"},
+                        "targets": [{"minValue": 150, "maxValue": 150}]}]},
+            {"type": "step", "length": {"value": 1, "unit": "repetition"},
+             "steps": [{"length": {"value": 300, "unit": "second"},
+                        "targets": [{"minValue": 300, "maxValue": 300}]}]},
+        ]
+        poly = _compute_native_polyline(blocks)
+        assert max(p[1] for p in poly) == 1.0    # 300 W peak → 1.0, not 3.0
+        assert any(p[1] == 0.5 for p in poly)     # 150 W → 150/300
+
+    def test_polyline_uses_minvalue_when_no_max(self):
+        """A floor-only target (`{"minValue": 55}`) is a real bar, not height 0."""
+        from tp_mcp.tools.library import _compute_native_polyline
+        blocks = [
+            {"type": "step", "length": {"value": 1, "unit": "repetition"},
+             "steps": [{"length": {"value": 300, "unit": "second"},
+                        "targets": [{"minValue": 55}]}]},
+            {"type": "step", "length": {"value": 1, "unit": "repetition"},
+             "steps": [{"length": {"value": 300, "unit": "second"},
+                        "targets": [{"minValue": 100, "maxValue": 100}]}]},
+        ]
+        poly = _compute_native_polyline(blocks)
+        assert any(p[1] == 0.55 for p in poly)
+
+    def test_ensure_preview_noop_on_non_native(self):
+        from tp_mcp.tools.library import _ensure_structure_preview
+        assert _ensure_structure_preview(None) is None
+        assert _ensure_structure_preview({"steps": []}) == {"steps": []}
+
+    def test_ensure_preview_does_not_mutate_caller(self):
+        """The helper returns a copy — the caller's structure dict is untouched."""
+        from tp_mcp.tools.library import _ensure_structure_preview
+        src = {"primaryIntensityMetric": "percentOfFtp",
+               "structure": [{"type": "step", "length": {"value": 1, "unit": "repetition"},
+                              "steps": [{"length": {"value": 300, "unit": "second"},
+                                         "targets": [{"minValue": 90, "maxValue": 90}]}]}]}
+        out = _ensure_structure_preview(src)
+        assert "polyline" in out
+        assert "polyline" not in src            # caller NOT mutated
+        assert out is not src
+
 
 class TestUpdateLibraryItem:
     @pytest.mark.asyncio
@@ -229,6 +342,24 @@ class TestScheduleLibraryWorkout:
         assert isinstance(payload["structure"], str)
 
     @pytest.mark.asyncio
+    async def test_single_athlete_ignores_bulk_shape(self):
+        """Omitting athletes keeps the original single-athlete result shape."""
+        items_response = APIResponse(success=True, data=[self.TEMPLATE])
+        create_response = APIResponse(success=True, data={"workoutId": 999})
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=items_response)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_schedule_library_workout("1", "10", "2026-04-01")
+
+        assert result["success"] is True
+        assert "scheduled" not in result
+        assert "errors" not in result
+
+    @pytest.mark.asyncio
     async def test_schedule_unknown_item_returns_not_found(self):
         items_response = APIResponse(success=True, data=[self.TEMPLATE])
         with patch("tp_mcp.tools.library.TPClient") as mock_client:
@@ -245,903 +376,160 @@ class TestScheduleLibraryWorkout:
         mock_instance.post.assert_not_called()
 
 
-class TestCreateStrengthWorkout:
-    @pytest.mark.asyncio
-    async def test_invalid_date(self):
-        result = await tp_create_strength_workout(
-            date="not-a-date", title="Strength", blocks=[{"blockType": "SingleExercise", "title": "X", "exercises": []}],
-        )
-        assert result["isError"] is True
-        assert result["error_code"] == "VALIDATION_ERROR"
+class TestScheduleLibraryWorkoutBulk:
+    TEMPLATE = TestScheduleLibraryWorkout.TEMPLATE
+
+    def _mock(self, mock_client, athlete_ids, post_responses):
+        items_response = APIResponse(success=True, data=[self.TEMPLATE])
+        mock_instance = AsyncMock()
+        mock_instance.ensure_athlete_id = AsyncMock(side_effect=athlete_ids)
+        mock_instance.get = AsyncMock(return_value=items_response)
+        mock_instance.post = AsyncMock(side_effect=post_responses)
+        mock_client.return_value.__aenter__.return_value = mock_instance
+        return mock_instance
 
     @pytest.mark.asyncio
-    async def test_empty_title(self):
-        result = await tp_create_strength_workout(
-            date="2026-04-01", title="   ", blocks=[{"blockType": "SingleExercise", "title": "X", "exercises": []}],
-        )
-        assert result["isError"] is True
-        assert result["error_code"] == "VALIDATION_ERROR"
-
-    @pytest.mark.asyncio
-    async def test_empty_blocks(self):
-        result = await tp_create_strength_workout(
-            date="2026-04-01", title="Strength", blocks=[],
-        )
-        assert result["isError"] is True
-        assert result["error_code"] == "VALIDATION_ERROR"
-
-    @pytest.mark.asyncio
-    async def test_creates_with_correct_payload(self):
-        response = APIResponse(success=True, data={"id": 999})
+    async def test_bulk_schedules_each_athlete(self):
         with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "WarmUp",
-                    "title": "Warm-up",
-                    "coachNotes": "Easy",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Air Squat",
-                            "sets": [
-                                {"parameter": "Reps", "value": 10},
-                                {"parameter": "Reps", "value": 10},
-                            ],
-                        },
-                    ],
-                },
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Back Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "200",
-                            "exercise_title": "Back Squat",
-                            "sets": [
-                                {"parameter": "Reps", "value": 5},
-                                {"parameter": "Reps", "value": 5},
-                                {"parameter": "Reps", "value": 5},
-                            ],
-                        },
-                    ],
-                },
-            ]
-
-            result = await tp_create_strength_workout(
-                date="2026-04-01", title="Strength A", blocks=blocks,
-            )
-
-        assert result["success"] is True
-        assert result["title"] == "Strength A"
-        assert result["date"] == "2026-04-01"
-        assert result["block_count"] == 2
-        assert result["workout_id"] == 999
-
-        call_args = mock_instance.post.call_args
-        endpoint = call_args[0][0]
-        payload = call_args[1]["json"]
-        base_url = call_args[1]["base_url"]
-
-        assert endpoint == "/rx/activity/v1/workouts/save"
-        assert base_url == "https://api.peakswaresb.com"
-
-        assert payload["workoutType"] == "StructuredStrength"
-        assert payload["calendarId"] == 123
-        assert payload["title"] == "Strength A"
-        assert payload["prescribedDate"] == "2026-04-01"
-        assert payload["orderOnDay"] == 1
-        assert payload["isHidden"] is False
-        assert payload["isLocked"] is False
-        assert payload["complianceState"] == "Unplanned"
-
-        assert len(payload["blocks"]) == 2
-        warmup = payload["blocks"][0]
-        assert warmup["blockType"] == "WarmUp"
-        assert warmup["title"] == "Warm-up"
-        assert warmup["coachNotes"] == "Easy"
-        # WarmUp blocks auto-inject a 5-minute TimeSeconds default when the
-        # caller doesn't supply block-level parameters.
-        assert len(warmup["parameters"]) == 1
-        assert warmup["parameters"][0]["parameter"] == "TimeSeconds"
-        assert warmup["parameters"][0]["prescribedValue"] == "300"
-        assert warmup["isComplete"] is False
-        assert warmup["compliancePercent"] == 0
-        assert warmup["complianceState"] == "NoCompletion"
-        # UUIDs are string-typed
-        assert isinstance(warmup["id"], str) and len(warmup["id"]) == 36
-
-        prescription = warmup["prescriptions"][0]
-        ex = prescription["exercise"]
-        assert ex["id"] == "100"
-        assert ex["title"] == "Air Squat"
-        assert ex["ownerId"] == 2000301
-        assert ex["videoUrl"] == ""
-        assert ex["instructions"] == ""
-        assert ex["primaryMuscleGroups"] == []
-        assert ex["secondaryMuscleGroups"] == []
-        assert ex["canEdit"] is False
-        # Exercise parameters must mirror the prescription-level parameters array
-        assert ex["parameters"] == prescription["parameters"]
-        assert prescription["coachNotes"] is None
-        assert prescription["complianceState"] == "NoCompletion"
-        assert prescription["setSummaryTemplate"] == "{Reps} Reps"
-
-        # Single shared parameter column
-        assert len(prescription["parameters"]) == 1
-        param = prescription["parameters"][0]
-        assert param["parameter"] == "Reps"
-        assert param["title"] == "Reps"
-        assert param["category"] == "Reps"
-        assert param["unit"] == {"title": "Reps", "abbreviation": "", "unit": "Reps"}
-
-        # Two sets, each with one parameterValue
-        assert len(prescription["sets"]) == 2
-        for s in prescription["sets"]:
-            assert s["isComplete"] is False
-            assert s["setOrigin"] == "Prescribed"
-            assert len(s["parameterValues"]) == 1
-            pv = s["parameterValues"][0]
-            assert pv["parameter"] == "Reps"
-            assert pv["inputFormat"] == "Integer"
-            assert pv["prescribedValue"] == "10"
-            assert pv["executedValue"] is None
-
-        # Back Squat: 3 sets of 5 reps
-        squat = payload["blocks"][1]
-        assert squat["blockType"] == "SingleExercise"
-        assert squat["coachNotes"] is None
-        assert len(squat["prescriptions"][0]["sets"]) == 3
-        assert all(
-            s["parameterValues"][0]["prescribedValue"] == "5"
-            for s in squat["prescriptions"][0]["sets"]
-        )
-
-    @pytest.mark.asyncio
-    async def test_unique_uuids_per_field(self):
-        response = APIResponse(success=True, data={})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Bench",
-                    "exercises": [
-                        {
-                            "exercise_id": "300",
-                            "exercise_title": "Bench Press",
-                            "sets": [
-                                {"parameter": "Reps", "value": 8},
-                                {"parameter": "Reps", "value": 8},
-                            ],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="W", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        block = payload["blocks"][0]
-        prescription = block["prescriptions"][0]
-
-        ids = [
-            block["id"],
-            prescription["id"],
-            prescription["parameters"][0]["id"],
-            prescription["sets"][0]["id"],
-            prescription["sets"][1]["id"],
-            prescription["sets"][0]["parameterValues"][0]["id"],
-            prescription["sets"][1]["parameterValues"][0]["id"],
-        ]
-        # All UUIDs distinct
-        assert len(set(ids)) == len(ids)
-
-    @pytest.mark.asyncio
-    async def test_auth_failure(self):
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=None)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            result = await tp_create_strength_workout(
-                date="2026-04-01",
-                title="Strength",
-                blocks=[
-                    {
-                        "blockType": "SingleExercise",
-                        "title": "X",
-                        "exercises": [],
-                    }
+            mock_instance = self._mock(
+                mock_client,
+                athlete_ids=[111, 222],
+                post_responses=[
+                    APIResponse(success=True, data={"workoutId": 1001}),
+                    APIResponse(success=True, data={"workoutId": 1002}),
                 ],
             )
 
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=["Alice", "222"],
+            )
+
+        assert result.get("isError") is not True
+        assert [s["athlete_id"] for s in result["scheduled"]] == [111, 222]
+        assert [s["workout_id"] for s in result["scheduled"]] == [1001, 1002]
+        assert result["errors"] == []
+        endpoints = [c[0][0] for c in mock_instance.post.call_args_list]
+        assert endpoints == [
+            "/fitness/v6/athletes/111/workouts",
+            "/fitness/v6/athletes/222/workouts",
+        ]
+        # Each payload targets its own athlete
+        payloads = [c[1]["json"] for c in mock_instance.post.call_args_list]
+        assert [p["athleteId"] for p in payloads] == [111, 222]
+        assert all(p["title"] == "Sweet Spot" for p in payloads)
+
+    @pytest.mark.asyncio
+    async def test_bulk_partial_failure_is_not_error(self):
+        """One athlete failing is reported in errors, without isError."""
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            self._mock(
+                mock_client,
+                athlete_ids=[111, 222],
+                post_responses=[
+                    APIResponse(success=True, data={"workoutId": 1001}),
+                    APIResponse(success=False, message="boom"),
+                ],
+            )
+
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=["Alice", "Bob"],
+            )
+
+        assert result.get("isError") is not True
+        assert len(result["scheduled"]) == 1
+        assert result["errors"] == [
+            {"athlete": "Bob", "athlete_id": 222, "message": "boom"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_bulk_unresolvable_athlete_reported(self):
+        """An athlete not in the roster (ensure_athlete_id -> None) is a
+        per-athlete error; the rest still get scheduled."""
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            mock_instance = self._mock(
+                mock_client,
+                athlete_ids=[None, 222],
+                post_responses=[
+                    APIResponse(success=True, data={"workoutId": 1002}),
+                ],
+            )
+
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=["Nobody", "222"],
+            )
+
+        assert result.get("isError") is not True
+        assert [s["athlete_id"] for s in result["scheduled"]] == [222]
+        assert result["errors"][0]["athlete"] == "Nobody"
+        assert mock_instance.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_bulk_ambiguous_name_reported(self):
+        """ensure_athlete_id raising ValueError (ambiguous name) becomes a
+        per-athlete error rather than blowing up the whole call."""
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            self._mock(
+                mock_client,
+                athlete_ids=[ValueError("Ambiguous athlete name 'Alex'"), 222],
+                post_responses=[
+                    APIResponse(success=True, data={"workoutId": 1002}),
+                ],
+            )
+
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=["Alex", "222"],
+            )
+
+        assert result.get("isError") is not True
+        assert "Ambiguous" in result["errors"][0]["message"]
+        assert [s["athlete_id"] for s in result["scheduled"]] == [222]
+
+    @pytest.mark.asyncio
+    async def test_bulk_total_failure_sets_is_error(self):
+        with patch("tp_mcp.tools.library.TPClient") as mock_client:
+            self._mock(
+                mock_client,
+                athlete_ids=[111, 222],
+                post_responses=[
+                    APIResponse(success=False, message="boom"),
+                    APIResponse(success=False, message="boom"),
+                ],
+            )
+
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=["Alice", "Bob"],
+            )
+
         assert result["isError"] is True
-        assert result["error_code"] == "AUTH_INVALID"
+        assert result["error_code"] == "API_ERROR"
+        assert result["scheduled"] == []
+        assert len(result["errors"]) == 2
 
     @pytest.mark.asyncio
-    async def test_duration_parameter_serialization(self):
-        """Duration parameters use inputFormat='Time', string prescribedValue, and bare template."""
-        response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
+    async def test_both_athlete_and_athletes_rejected(self):
+        """Passing the single 'athlete' target alongside 'athletes' is a
+        validation error before any API call."""
+        token = athlete_override.set("Alice")
+        try:
+            with patch("tp_mcp.tools.library.TPClient") as mock_client:
+                result = await tp_schedule_library_workout(
+                    "1", "10", "2026-04-01", athletes=["Bob"],
+                )
+        finally:
+            athlete_override.reset(token)
 
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Plank",
-                    "exercises": [
-                        {
-                            "exercise_id": "400",
-                            "exercise_title": "Plank",
-                            "sets": [
-                                {"parameter": "Duration", "value": 30},
-                                {"parameter": "Duration", "value": 45},
-                            ],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Core", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        prescription = payload["blocks"][0]["prescriptions"][0]
-
-        assert prescription["setSummaryTemplate"] == "{Duration}"
-        assert prescription["parameters"][0]["parameter"] == "Duration"
-        assert prescription["parameters"][0]["category"] == "Duration"
-        assert prescription["parameters"][0]["unit"] == {
-            "title": "Seconds",
-            "abbreviation": "sec",
-            "unit": "Seconds",
-        }
-
-        pv0 = prescription["sets"][0]["parameterValues"][0]
-        pv1 = prescription["sets"][1]["parameterValues"][0]
-        assert pv0["inputFormat"] == "Time"
-        assert pv0["prescribedValue"] == "30"
-        assert pv1["inputFormat"] == "Time"
-        assert pv1["prescribedValue"] == "45"
-
-    @pytest.mark.asyncio
-    async def test_weightlb_parameter_serialization(self):
-        """WeightLb parameters use inputFormat='Decimal', string-or-None prescribedValue."""
-        response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Bench",
-                    "exercises": [
-                        {
-                            "exercise_id": "500",
-                            "exercise_title": "Bench Press",
-                            "sets": [
-                                {"parameter": "WeightLb", "value": 135},
-                                {"parameter": "WeightLb", "value": None},
-                            ],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Bench Day", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        prescription = payload["blocks"][0]["prescriptions"][0]
-
-        assert prescription["setSummaryTemplate"] == "{WeightLb} lbs"
-        assert prescription["parameters"][0]["unit"] == {
-            "title": "Pounds",
-            "abbreviation": "lb",
-            "unit": "Pounds",
-        }
-        pv0 = prescription["sets"][0]["parameterValues"][0]
-        pv1 = prescription["sets"][1]["parameterValues"][0]
-        assert pv0["inputFormat"] == "Decimal"
-        assert pv0["prescribedValue"] == "135"
-        assert pv1["inputFormat"] == "Decimal"
-        assert pv1["prescribedValue"] is None
-
-    @pytest.mark.asyncio
-    async def test_exercise_video_url_and_instructions_passthrough(self):
-        """Optional video_url and instructions on the exercise are passed through."""
-        response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.post = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Custom",
-                    "exercises": [
-                        {
-                            "exercise_id": "600",
-                            "exercise_title": "Custom Lift",
-                            "video_url": "https://example.com/v.mp4",
-                            "instructions": "Lift with form.",
-                            "sets": [{"parameter": "Reps", "value": 8}],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Custom Day", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        ex = payload["blocks"][0]["prescriptions"][0]["exercise"]
-        assert ex["videoUrl"] == "https://example.com/v.mp4"
-        assert ex["instructions"] == "Lift with form."
-
-
-# ---------------------------------------------------------------------------
-# get_exercise_params + libraryContent caching
-# ---------------------------------------------------------------------------
-
-LIBRARY_CONTENT = {
-    "exercises": [
-        {
-            "id": 100,
-            "title": "Back Squat",
-            "parameters": [
-                {
-                    "parameter": "Reps",
-                    "title": "Reps",
-                    "category": "Reps",
-                    "unit": {"title": "Reps", "abbreviation": "", "unit": "Reps"},
-                    "inputFormat": "Integer",
-                },
-                {
-                    "parameter": "WeightLb",
-                    "title": "Weight",
-                    "category": "WeightLb",
-                    "unit": {"title": "Pounds", "abbreviation": "lb", "unit": "Pounds"},
-                    "inputFormat": "Decimal",
-                },
-            ],
-        },
-        {
-            "id": 200,
-            "title": "Plank",
-            "parameters": [
-                {
-                    "parameter": "Duration",
-                    "title": "Duration",
-                    "category": "Duration",
-                    "unit": {"title": "Seconds", "abbreviation": "sec", "unit": "Seconds"},
-                    "inputFormat": "Time",
-                },
-            ],
-        },
-    ]
-}
-
-
-class TestGetExerciseParams:
-    @pytest.mark.asyncio
-    async def test_returns_params_for_matching_exercise(self):
-        client = AsyncMock()
-        client.get = AsyncMock(return_value=APIResponse(success=True, data=LIBRARY_CONTENT))
-
-        params = await get_exercise_params(client, "100")
-
-        assert params is not None
-        assert [p["parameter"] for p in params] == ["Reps", "WeightLb"]
-        # Hits the libraryContent endpoint on the RX host
-        endpoint, = client.get.call_args[0]
-        assert endpoint == "/rx/activity/v1/libraryContent"
-        assert client.get.call_args[1]["base_url"] == "https://api.peakswaresb.com"
-
-    @pytest.mark.asyncio
-    async def test_returns_none_for_unknown_exercise(self):
-        client = AsyncMock()
-        client.get = AsyncMock(return_value=APIResponse(success=True, data=LIBRARY_CONTENT))
-
-        params = await get_exercise_params(client, "9999")
-
-        assert params is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_api_error(self):
-        client = AsyncMock()
-        client.get = AsyncMock(return_value=APIResponse(success=False, message="boom"))
-
-        params = await get_exercise_params(client, "100")
-
-        assert params is None
-
-    @pytest.mark.asyncio
-    async def test_cache_avoids_repeat_fetch(self):
-        client = AsyncMock()
-        client.get = AsyncMock(return_value=APIResponse(success=True, data=LIBRARY_CONTENT))
-
-        cache: dict = {}
-        await get_exercise_params(client, "100", cache=cache)
-        await get_exercise_params(client, "200", cache=cache)
-        await get_exercise_params(client, "9999", cache=cache)
-
-        assert client.get.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# tp_search_exercises
-# ---------------------------------------------------------------------------
-
-
-class TestSearchExercises:
-    @pytest.mark.asyncio
-    async def test_finds_matches_case_insensitive(self):
-        response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            result = await tp_search_exercises("squat")
-
-        assert result["count"] == 1
-        assert result["matches"] == [{"id": "100", "title": "Back Squat"}]
-        assert result["query"] == "squat"
-        # Searches the libraryContent endpoint on the RX host
-        endpoint, = mock_instance.get.call_args[0]
-        assert endpoint == "/rx/activity/v1/libraryContent"
-        assert mock_instance.get.call_args[1]["base_url"] == "https://api.peakswaresb.com"
-
-    @pytest.mark.asyncio
-    async def test_empty_query_returns_validation_error(self):
-        result = await tp_search_exercises("   ")
         assert result["isError"] is True
         assert result["error_code"] == "VALIDATION_ERROR"
+        assert "not both" in result["message"]
+        mock_client.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_matches_returns_empty_list(self):
-        response = APIResponse(success=True, data=LIBRARY_CONTENT)
+    async def test_empty_athletes_list_rejected(self):
         with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            result = await tp_search_exercises("nonexistent")
-
-        assert result["count"] == 0
-        assert result["matches"] == []
-
-    @pytest.mark.asyncio
-    async def test_propagates_api_error(self):
-        response = APIResponse(success=False, message="bad")
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            result = await tp_search_exercises("squat")
+            result = await tp_schedule_library_workout(
+                "1", "10", "2026-04-01", athletes=[],
+            )
 
         assert result["isError"] is True
-        assert result["message"] == "bad"
-
-
-# ---------------------------------------------------------------------------
-# tp_create_strength_workout — libraryContent-driven parameter resolution
-# ---------------------------------------------------------------------------
-
-
-class TestStrengthWorkoutWithDefinedParams:
-    @pytest.mark.asyncio
-    async def test_uses_defined_params_for_all_columns(self):
-        """When libraryContent returns params, every set carries the full column set."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Back Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [
-                                {"parameter": "Reps", "value": 5},
-                                {"parameter": "WeightLb", "value": 225},
-                            ],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Strength", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        prescription = payload["blocks"][0]["prescriptions"][0]
-
-        # Columns mirror the libraryContent definition order
-        assert [p["parameter"] for p in prescription["parameters"]] == [
-            "Reps",
-            "WeightLb",
-        ]
-        # WeightLb column uses Pounds unit & Decimal inputFormat from the API
-        assert prescription["parameters"][1]["unit"]["abbreviation"] == "lb"
-
-        # Both sets carry both parameters; only the user-supplied one has a value
-        set_reps = prescription["sets"][0]["parameterValues"]
-        assert [pv["parameter"] for pv in set_reps] == ["Reps", "WeightLb"]
-        assert set_reps[0]["prescribedValue"] == "5"
-        assert set_reps[0]["inputFormat"] == "Integer"
-        assert set_reps[1]["prescribedValue"] is None
-        assert set_reps[1]["inputFormat"] == "Decimal"
-
-        set_weight = prescription["sets"][1]["parameterValues"]
-        assert set_weight[0]["prescribedValue"] is None
-        assert set_weight[1]["prescribedValue"] == "225"
-
-        assert prescription["setSummaryTemplate"] == "{Reps} Reps {WeightLb} lbs"
-
-    @pytest.mark.asyncio
-    async def test_library_content_fetched_once_for_multiple_exercises(self):
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 5}],
-                        },
-                    ],
-                },
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Plank",
-                    "exercises": [
-                        {
-                            "exercise_id": "200",
-                            "exercise_title": "Plank",
-                            "sets": [{"parameter": "Duration", "value": 30}],
-                        },
-                        # Repeat the same exercise to confirm dedupe also works
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 3}],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Strength", blocks=blocks,
-            )
-
-        assert mock_instance.get.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_falls_back_when_library_content_errors(self):
-        """If libraryContent fails, the legacy column-from-input behavior is used."""
-        get_response = APIResponse(success=False, message="boom")
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [
-                                {"parameter": "Reps", "value": 5},
-                                {"parameter": "Reps", "value": 5},
-                            ],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="Strength", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        prescription = payload["blocks"][0]["prescriptions"][0]
-        # Legacy behavior: one column derived from input, one parameterValue per set
-        assert [p["parameter"] for p in prescription["parameters"]] == ["Reps"]
-        assert all(len(s["parameterValues"]) == 1 for s in prescription["sets"])
-
-    @pytest.mark.asyncio
-    async def test_warmup_block_level_parameters_passed_through(self):
-        """WarmUp/CoolDown blocks may carry block-level params (e.g. TimeSeconds)."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "WarmUp",
-                    "title": "Warm-up",
-                    "parameters": [{"parameter": "TimeSeconds", "value": 300}],
-                    "exercises": [],
-                },
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Back Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 5}],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="S", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        warmup = payload["blocks"][0]
-        # Block-level parameter is preserved and fully shaped
-        assert len(warmup["parameters"]) == 1
-        bp = warmup["parameters"][0]
-        assert bp["parameter"] == "TimeSeconds"
-        assert bp["title"] == "TimeSeconds"
-        assert bp["unit"] == {"title": "Seconds", "abbreviation": "sec", "unit": "Seconds"}
-        assert bp["inputFormat"] == "Integer"
-        assert bp["prescribedValue"] == "300"
-        assert bp["executedValue"] is None
-        assert isinstance(bp["id"], str) and len(bp["id"]) == 36
-
-        # SingleExercise still gets an empty block-level parameters array
-        assert payload["blocks"][1]["parameters"] == []
-
-    @pytest.mark.asyncio
-    async def test_warmup_auto_injects_default_timeseconds(self):
-        """WarmUp blocks without parameters get a 5-minute TimeSeconds default."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {"blockType": "WarmUp", "title": "Warm-up", "exercises": []},
-                {"blockType": "CoolDown", "title": "Cool-down", "exercises": []},
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 5}],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="S", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-
-        for idx, expected_type in enumerate(("WarmUp", "CoolDown")):
-            block = payload["blocks"][idx]
-            assert block["blockType"] == expected_type
-            assert len(block["parameters"]) == 1
-            bp = block["parameters"][0]
-            assert bp["parameter"] == "TimeSeconds"
-            assert bp["title"] == "Total Time Seconds"
-            assert bp["unit"] == {
-                "title": "Seconds",
-                "abbreviation": "sec",
-                "unit": "Seconds",
-            }
-            assert bp["inputFormat"] == "Integer"
-            assert bp["prescribedValue"] == "300"
-            assert bp["executedValue"] is None
-            assert isinstance(bp["id"], str) and len(bp["id"]) == 36
-
-        # SingleExercise still gets no auto-injection
-        assert payload["blocks"][2]["parameters"] == []
-
-    @pytest.mark.asyncio
-    async def test_warmup_user_timeseconds_overrides_default(self):
-        """User-supplied TimeSeconds on WarmUp/CoolDown wins over the default."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "WarmUp",
-                    "title": "Long warm-up",
-                    "parameters": [{"parameter": "TimeSeconds", "value": 900}],
-                    "exercises": [],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="S", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        warmup = payload["blocks"][0]
-        # Single TimeSeconds entry — no duplicate from auto-injection
-        names = [p["parameter"] for p in warmup["parameters"]]
-        assert names == ["TimeSeconds"]
-        assert warmup["parameters"][0]["prescribedValue"] == "900"
-
-    @pytest.mark.asyncio
-    async def test_block_parameters_untouched_by_exercise_lookup(self):
-        """Exercise libraryContent lookup must not modify block-level parameters."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "WarmUp",
-                    "title": "Warm-up",
-                    "parameters": [{"parameter": "TimeSeconds", "value": 600}],
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 10}],
-                        },
-                    ],
-                },
-            ]
-            await tp_create_strength_workout(
-                date="2026-04-01", title="S", blocks=blocks,
-            )
-
-        payload = mock_instance.post.call_args[1]["json"]
-        warmup = payload["blocks"][0]
-        # Block-level params still only contain TimeSeconds — exercise's
-        # Reps/WeightLb columns must not leak into the block.parameters array.
-        names = [p["parameter"] for p in warmup["parameters"]]
-        assert names == ["TimeSeconds"]
-        # And the exercise prescription still gets its own libraryContent-driven columns
-        prescription = warmup["prescriptions"][0]
-        assert [p["parameter"] for p in prescription["parameters"]] == [
-            "Reps",
-            "WeightLb",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_library_content_failure_logged(self, caplog):
-        """Failed libraryContent fetches must surface in logs, not silently fall back."""
-        get_response = APIResponse(
-            success=False,
-            error_code=ErrorCode.API_ERROR,
-            message="500 Internal Server Error",
-        )
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Squat",
-                    "exercises": [
-                        {
-                            "exercise_id": "100",
-                            "exercise_title": "Back Squat",
-                            "sets": [{"parameter": "Reps", "value": 5}],
-                        },
-                    ],
-                },
-            ]
-            with caplog.at_level("WARNING", logger="tp-mcp"):
-                await tp_create_strength_workout(
-                    date="2026-04-01", title="S", blocks=blocks,
-                )
-
-        assert any(
-            "libraryContent fetch failed" in rec.message and "500" in rec.message
-            for rec in caplog.records
-        )
-
-    @pytest.mark.asyncio
-    async def test_unknown_exercise_id_logged(self, caplog):
-        """Missing exercise IDs in libraryContent must log a warning."""
-        get_response = APIResponse(success=True, data=LIBRARY_CONTENT)
-        post_response = APIResponse(success=True, data={"id": 1})
-        with patch("tp_mcp.tools.library.TPClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
-            mock_instance.get = AsyncMock(return_value=get_response)
-            mock_instance.post = AsyncMock(return_value=post_response)
-            mock_client.return_value.__aenter__.return_value = mock_instance
-
-            blocks = [
-                {
-                    "blockType": "SingleExercise",
-                    "title": "Mystery",
-                    "exercises": [
-                        {
-                            "exercise_id": "9999",
-                            "exercise_title": "Mystery Lift",
-                            "sets": [{"parameter": "Reps", "value": 5}],
-                        },
-                    ],
-                },
-            ]
-            with caplog.at_level("WARNING", logger="tp-mcp"):
-                await tp_create_strength_workout(
-                    date="2026-04-01", title="S", blocks=blocks,
-                )
-
-        assert any(
-            "Exercise id 9999 not found" in rec.message for rec in caplog.records
-        )
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client.assert_not_called()
