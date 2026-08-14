@@ -10,8 +10,10 @@ All tests here are offline - no TrainingPeaks network calls.
 
 import json
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -76,6 +78,26 @@ class TestProtocolLayer:
         from tp_mcp import __version__
 
         assert server.version == __version__
+
+    def test_all_version_reports_derive_from_project_metadata(self):
+        """pyproject.toml is authoritative; generated/runtime reports must agree."""
+        from importlib.metadata import version
+
+        from tp_mcp import __version__
+
+        root = Path(__file__).resolve().parents[1]
+        project_text = (root / "pyproject.toml").read_text(encoding="utf-8")
+        lock_text = (root / "uv.lock").read_text(encoding="utf-8")
+        project_match = re.search(r'(?ms)^\[project\].*?^version = "([^"]+)"', project_text)
+        lock_match = re.search(r'(?ms)^\[\[package\]\]\s+name = "tp-mcp"\s+version = "([^"]+)"', lock_text)
+
+        assert project_match is not None
+        assert lock_match is not None
+        project_version = project_match.group(1)
+        assert lock_match.group(1) == project_version
+        assert version("tp-mcp") == project_version
+        assert __version__ == project_version
+        assert server.version == project_version
 
     def test_httpx_and_httpx2_coexist(self):
         # tp_mcp's own client uses httpx; SDK v2 brings httpx2. Both must import.
