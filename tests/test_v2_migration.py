@@ -74,6 +74,86 @@ class TestProtocolLayer:
             payload = json.loads(result.content[0].text)
             assert payload["error_code"] == "INVALID_ARGS"
 
+    async def test_distance_swim_payload_through_supported_mcp_client(self):
+        """Exercise distance mode through the public MCP client, not a helper call."""
+        from unittest.mock import AsyncMock, patch
+
+        from mcp import Client
+
+        from tp_mcp.client.http import APIResponse
+
+        structure = json.dumps(
+            {
+                "primaryLengthMetric": "distance",
+                "primaryIntensityMetric": "rpe",
+                "distance_unit": "meter",
+                "steps": [
+                    {
+                        "name": "Warm up",
+                        "distance_value": 200,
+                        "distance_unit": "meter",
+                        "intensity_min": 2,
+                        "intensity_max": 3,
+                    },
+                    {
+                        "type": "repetition",
+                        "name": "4 x 50",
+                        "reps": 4,
+                        "steps": [
+                            {
+                                "name": "Fast",
+                                "distance_value": 50,
+                                "distance_unit": "meter",
+                                "intensity_min": 7,
+                                "intensity_max": 8,
+                            }
+                        ],
+                    },
+                    {
+                        "name": "Cool down",
+                        "distance_value": 100,
+                        "distance_unit": "meter",
+                        "intensity_min": 1,
+                        "intensity_max": 2,
+                    },
+                ],
+            }
+        )
+        created = APIResponse(
+            success=True,
+            data={"workoutId": 9005, "title": "Distance swim", "workoutDay": "2026-08-14T00:00:00"},
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            instance = AsyncMock()
+            instance.ensure_athlete_id = AsyncMock(return_value=123)
+            instance.post = AsyncMock(return_value=created)
+            mock_client.return_value.__aenter__.return_value = instance
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "tp_create_workout",
+                    {
+                        "date": "2026-08-14",
+                        "sport": "Swim",
+                        "title": "Distance swim",
+                        "duration_minutes": 30,
+                        "structure": structure,
+                    },
+                )
+
+        response = json.loads(result.content[0].text)
+        assert response["success"] is True
+        wire = json.loads(instance.post.call_args.kwargs["json"]["structure"])
+        assert wire["primaryLengthMetric"] == "distance"
+        assert wire["visualizationDistanceUnit"] == "meter"
+        assert "polyline" not in wire
+        assert [(block["begin"], block["end"]) for block in wire["structure"]] == [
+            (0, 200),
+            (200, 400),
+            (400, 500),
+        ]
+        assert wire["structure"][1]["steps"][0]["length"] == {"value": 50, "unit": "meter"}
+
     async def test_server_reports_package_version(self):
         from tp_mcp import __version__
 
