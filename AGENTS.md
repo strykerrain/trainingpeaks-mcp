@@ -8,7 +8,15 @@ Orientation for AI agents working in this repository.
 [JamsusMaximus/trainingpeaks-mcp](https://github.com/JamsusMaximus/trainingpeaks-mcp) — a Python
 MCP (Model Context Protocol) server that exposes the TrainingPeaks web API as tools an AI
 assistant can call. Package name is `tp-mcp` (see `pyproject.toml`), source lives under
-`src/tp_mcp/`, and the server registers **67 tools** (verified at runtime via `tools/list`) in `src/tp_mcp/server.py`.
+`src/tp_mcp/`, and the server registers tools in `src/tp_mcp/server.py`. **The count depends on the
+branch** — see [Branch divergence](#branch-divergence) before quoting a number:
+
+| Branch | Registered tools | Read / write |
+| --- | --- | --- |
+| `main` (default) | **65** | 31 / 34 |
+| `develop` (what actually runs) | **67** | 32 / 35 |
+
+`README.md` says "Tools (64)" on both branches; it is stale on both.
 
 This fork is maintained to support a working endurance-coaching practice. The fork exists to
 serve a real coaching workflow, so changes here are judged by whether they make athlete
@@ -156,13 +164,68 @@ worktree's `src/` before invoking pytest, or the suite will silently test the ot
 Tests live in `tests/` mirroring the package layout (`test_auth/`, `test_client/`, `test_tools/`)
 and mock `httpx` — nothing in the suite touches the TrainingPeaks API.
 
+## Branch divergence
+
+`main` is the default branch on GitHub, but **`develop` is the branch that actually
+runs.** The user-level `trainingpeaks` MCP entry points at an editable install
+(`_editable_impl_tp_mcp.pth` → `src`) in a checkout that sits on `develop`, so a live
+`tools/list` handshake reports *develop's* tool set regardless of what `main` contains.
+
+At the time of writing `develop` is **17 commits ahead of and 3 behind** `main`, across
+19 files — but that framing understates it. **The divergence is not symmetric.**
+
+The 3 commits `main` has that `develop` lacks are `f5b633e`, `9a04a1f` and `fe0797e` —
+all dated 2026-07-31, all touching **only this file** (`AGENTS.md`, +168/-0). No product
+code.
+
+The 17 commits `develop` has that `main` lacks span **2026-06-11 to 2026-07-01** and are
+all real work:
+
+| Area | Examples |
+| --- | --- |
+| Workout structure | distance-based intervals for **swim** workouts (`d114624`), `percentOfMaxHr` + `rpe` as valid `primaryIntensityMetric` values confirmed against a live capture (`9d2036f`), int coercion for distance (`6aec27a`) |
+| Coach mode | `isHidden` on workout create/update so a workout can be hidden from the athlete (`cfba0c3`) |
+| Events | attach workouts to an event via `tp_update_event(workout_ids=…)` (`1751543`) |
+| Library | `tp_create_library` payload fix, listing fields, workout type on update, broken schedule endpoint (`4d34048`, `adad0c3`, `16a122f`) |
+| Strength | `tp_create_strength_workout`, render-crash fix, `RX_API_BASE` (`85f94a9`, `9246f31`, `dbf1e01`) |
+
+Roughly **+1,400 lines of tests** come with it (`test_library.py` alone is +1027).
+
+So `main` is not a peer of `develop` — it is **about a month stale on product code**.
+Anyone cloning this repo fresh gets `main` and silently loses swim distance intervals,
+coach-mode hiding, strength workouts and the library fixes. The local checkout is on
+`develop`, so the running server has them; a new clone would not.
+
+Practical consequences:
+
+- **A runtime handshake cannot answer a question about `main`.** Check out the branch you
+  mean, or read the file at an explicit ref.
+- **Anything documented here about tool availability is branch-specific.** State the branch.
+
 ## Known open item
 
 Upstream **PR #115** by `evilbruce666` (Alexey Kalinin), *"feat(strength): structured
-strength/gym workouts via Peaksware API"*, is **merged upstream but not synced into this fork**.
-It adds the strength exercise catalogue (exercise search) and strength workout create/delete
-support. The tools it introduces do not exist in `src/tp_mcp/tools/` here.
+strength/gym workouts via Peaksware API"*, is **merged upstream but not merged into this
+fork**.
 
-This is **deferred, not rejected**. If strength-workout tools are needed, the work is to merge
-`upstream/main` (or cherry-pick that PR) and re-run the full check suite — expect conflicts in
-`server.py`'s tool registry and in `tools/__init__.py`.
+**This is not a straightforward sync.** This fork has an independent implementation of the
+same feature — but it is **on `develop` only, and absent from `main`**:
+
+| Tool | Branch | Defined in | Added |
+| --- | --- | --- | --- |
+| `tp_search_exercises` | `develop` only | `src/tp_mcp/tools/library.py` | `85f94a9` (2026-06-10) |
+| `tp_create_strength_workout` | `develop` only | `src/tp_mcp/tools/library.py` | `85f94a9` (2026-06-10) |
+
+On `main`, both are absent from `tools/library.py` and `tools/__init__.py` has zero
+references to either. `git branch --contains 85f94a9` returns `develop` only. `7280262`
+(2026-06-10) recorded a render crash in the exercise object and `dbf1e01` (2026-06-30)
+added the missing `RX_API_BASE` constant; no WIP or TODO markers remain in `library.py`
+on `develop`.
+
+So the strength work is **doubly unmerged**: divergent from upstream *and* not on this
+fork's default branch. Before merging `upstream/main`, decide which implementation wins.
+Resolving those conflicts mechanically would silently pick one.
+
+Upstream may also carry a strength-workout **delete** path that this fork lacks — not
+verified against the PR diff.
+
