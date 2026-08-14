@@ -394,6 +394,7 @@ async def tp_create_workout(
     tags: str | None = None,
     feeling: int | None = None,
     rpe: int | None = None,
+    is_hidden: bool | None = None,
 ) -> dict[str, Any]:
     """Create a planned workout.
 
@@ -409,8 +410,9 @@ async def tp_create_workout(
         structured_workout: Optional native TP structured workout payload.
         subtype_id: Optional workout subtype ID (e.g. Road Bike=3).
         tags: Optional comma-separated tags string.
-        feeling: Optional feeling score (0-10).
-        rpe: Optional RPE score (1-10).
+        feeling: Optional TrainingPeaks feeling value (0-10).
+        rpe: Optional RPE score (0-10).
+        is_hidden: Optional to hide the workout to the athlete.
 
     Returns:
         Dict with created workout details or error.
@@ -430,6 +432,7 @@ async def tp_create_workout(
             tags=tags,
             feeling=feeling,
             rpe=rpe,
+            is_hidden=is_hidden,
         )
     except (ValidationError, ValueError) as e:
         msg = format_validation_error(e) if isinstance(e, ValidationError) else str(e)
@@ -488,6 +491,7 @@ async def tp_create_workout(
             "workoutTypeFamilyId": family_id,
             "workoutTypeValueId": type_id,
             "title": params.title,
+            "isHidden": params.is_hidden if params.is_hidden is not None else False,
         }
         if isinstance(params.date, datetime_type):
             payload["startTimePlanned"] = _format_start_time_planned(params.date)
@@ -558,6 +562,7 @@ async def tp_update_workout(
     coach_comment: str | None = None,
     feeling: int | None = None,
     rpe: int | None = None,
+    is_hidden: bool | None = None,
     structure: dict[str, Any] | str | None = None,
     structured_workout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -587,6 +592,7 @@ async def tp_update_workout(
             coach_comment=coach_comment,
             feeling=feeling,
             rpe=rpe,
+            is_hidden=is_hidden,
             structure=structure,
             structured_workout=structured_workout,
         )
@@ -662,7 +668,7 @@ async def tp_update_workout(
             existing["workoutTypeFamilyId"] = family_id
             existing["workoutTypeValueId"] = type_id
         if params.subtype_id is not None:
-            existing["workoutTypeValueId"] = params.subtype_id
+            existing["workoutSubTypeId"] = params.subtype_id
         if params.title is not None:
             existing["title"] = params.title
         if params.description is not None:
@@ -691,6 +697,8 @@ async def tp_update_workout(
             existing["feeling"] = params.feeling
         if params.rpe is not None:
             existing["rpe"] = params.rpe
+        if params.is_hidden is not None:
+            existing["isHidden"] = params.is_hidden
         if params.structure is not None:
             existing["structure"] = json.dumps(structure_payload.wire_structure)
             if effective_if is not None:

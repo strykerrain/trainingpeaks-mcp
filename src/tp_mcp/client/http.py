@@ -1,6 +1,7 @@
 """HTTP client wrapper for TrainingPeaks API."""
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -9,6 +10,8 @@ from typing import Any
 import httpx
 
 from tp_mcp.auth import get_credential
+
+logger = logging.getLogger("tp-mcp")
 
 TP_API_BASE = "https://tpapi.trainingpeaks.com"
 DEFAULT_TIMEOUT = 30.0
@@ -52,6 +55,24 @@ class ErrorCode(Enum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     API_ERROR = "API_ERROR"
     NETWORK_ERROR = "NETWORK_ERROR"
+    FORBIDDEN_ENDPOINT = "FORBIDDEN_ENDPOINT"
+
+
+# Hard-blocked endpoints — destructive operations the connector must NEVER issue,
+# regardless of caller (tool, probe, or future code). DEFENSE-IN-DEPTH safeguard.
+#
+# /plans/v1/commands/applyplan — the NATIVE training-plan apply command. Live
+# incident 2026-06-17: applying a published plan via this command produced a
+# degenerate application that associated the SOURCE plan-template's own workouts
+# with the application; a subsequent Unapply ("remove all associated workouts")
+# then DELETED the template's 139 workouts, emptying a published Plan-Store plan.
+# The connector applies plans with a SYNTHETIC copy (tp_apply_training_plan), which
+# never calls this command, so blocking it loses no functionality.
+_FORBIDDEN_ENDPOINTS: tuple[str, ...] = ("/plans/v1/commands/applyplan",)
+
+
+def _is_forbidden(endpoint: str) -> bool:
+    return any(bad in endpoint for bad in _FORBIDDEN_ENDPOINTS)
 
 
 @dataclass
@@ -293,6 +314,7 @@ class TPClient:
         endpoint: str,
         json: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
+        base_url: str | None = None,
         _retry_on_401: bool = True,
     ) -> APIResponse:
         """Make an authenticated API request.
@@ -302,11 +324,22 @@ class TPClient:
             endpoint: API endpoint (e.g., "/users/v3/user").
             json: JSON body for POST/PUT requests.
             params: Query parameters.
+            base_url: Optional base URL override for endpoints not on the default host.
             _retry_on_401: Internal flag to prevent infinite retry loops.
 
         Returns:
             APIResponse with data or error.
         """
+        if _is_forbidden(endpoint):
+            logger.error("BLOCKED forbidden endpoint: %s %s", method, endpoint)
+            return APIResponse(
+                success=False,
+                error_code=ErrorCode.FORBIDDEN_ENDPOINT,
+                message=(f"Endpoint {endpoint} is disabled in this connector "
+                         "(destructive plan operation — has emptied a published plan). "
+                         "Use the synthetic tp_apply_training_plan instead."),
+            )
+
         await self._ensure_client()
         assert self._client is not None
 
@@ -317,7 +350,7 @@ class TPClient:
 
         await self._throttle()
 
-        url = f"{self.base_url}{endpoint}"
+        url = f"{base_url or self.base_url}{endpoint}"
         headers = self._get_headers()
 
         try:
@@ -333,7 +366,14 @@ class TPClient:
             if response.status_code == 401 and _retry_on_401:
                 # Token might have expired mid-request, clear and retry once
                 self._token_cache.clear()
-                return await self._request(method, endpoint, json=json, params=params, _retry_on_401=False)
+                return await self._request(
+                    method,
+                    endpoint,
+                    json=json,
+                    params=params,
+                    base_url=base_url,
+                    _retry_on_401=False,
+                )
 
             return self._handle_response(response)
 
@@ -412,29 +452,41 @@ class TPClient:
             message=f"API error: {response.status_code}",
         )
 
-    async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> APIResponse:
+    async def get(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+        base_url: str | None = None,
+    ) -> APIResponse:
         """Make a GET request.
 
         Args:
             endpoint: API endpoint.
             params: Query parameters.
+            base_url: Optional base URL override for endpoints not on the default host.
 
         Returns:
             APIResponse.
         """
-        return await self._request("GET", endpoint, params=params)
+        return await self._request("GET", endpoint, params=params, base_url=base_url)
 
-    async def post(self, endpoint: str, json: dict[str, Any] | list[Any] | None = None) -> APIResponse:
+    async def post(
+        self,
+        endpoint: str,
+        json: dict[str, Any] | list[Any] | None = None,
+        base_url: str | None = None,
+    ) -> APIResponse:
         """Make a POST request.
 
         Args:
             endpoint: API endpoint.
             json: JSON body.
+            base_url: Optional base URL override for endpoints not on the default host.
 
         Returns:
             APIResponse.
         """
-        return await self._request("POST", endpoint, json=json)
+        return await self._request("POST", endpoint, json=json, base_url=base_url)
 
     async def put(self, endpoint: str, json: dict[str, Any] | list[Any] | None = None) -> APIResponse:
         """Make a PUT request.
@@ -471,6 +523,13 @@ class TPClient:
         Returns:
             RawResponse with binary content and headers, or error.
         """
+        if _is_forbidden(endpoint):
+            logger.error("BLOCKED forbidden endpoint: GET %s", endpoint)
+            return RawResponse(
+                success=False,
+                error_code=ErrorCode.FORBIDDEN_ENDPOINT,
+                message=f"Endpoint {endpoint} is disabled in this connector.",
+            )
         await self._ensure_client()
         assert self._client is not None
 

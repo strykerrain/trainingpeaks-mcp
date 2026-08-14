@@ -56,12 +56,14 @@ class TestListTools:
             "tp_add_workout_comment",
             "tp_validate_structure",
             "tp_get_workout_types",
+            "tp_get_zone_methods",
             "tp_get_atp",
             "tp_get_weekly_summary",
             "tp_get_athlete_settings",
             "tp_update_ftp",
             "tp_update_hr_zones",
             "tp_update_speed_zones",
+            "tp_create_zones",
             "tp_update_nutrition",
             "tp_get_pool_length_settings",
             "tp_log_metrics",
@@ -95,7 +97,16 @@ class TestListTools:
             "tp_create_library_item",
             "tp_update_library_item",
             "tp_schedule_library_workout",
+            "tp_search_exercises",
+            "tp_create_strength_workout",
             "tp_list_athletes",
+            "tp_list_groups",
+            "tp_list_athletes_in_group",
+            "tp_create_group",
+            "tp_rename_group",
+            "tp_delete_group",
+            "tp_add_athletes_to_group",
+            "tp_remove_athletes_from_group",
             "tp_upload_workout_file",
             "tp_download_workout_file",
             "tp_delete_workout_file",
@@ -103,6 +114,17 @@ class TestListTools:
             "tp_unpair_workout",
             "tp_set_workout_note",
             "tp_get_workout_note",
+            "tp_search_exercises",
+            "tp_create_strength_workout",
+            "tp_get_strength_summary",
+            "tp_get_strength_workouts",
+            "tp_get_strength_workout",
+            "tp_update_strength_workout",
+            "tp_delete_strength_workout",
+            "tp_list_training_plans",
+            "tp_get_training_plan",
+            "tp_get_training_plan_workouts",
+            "tp_apply_training_plan",
         }
         assert v2_tools.issubset(names)
         assert len(names) == len(core_tools) + len(v2_tools)
@@ -112,21 +134,25 @@ class TestListTools:
         """The tp_create_workout schema should advertise optional structured_workout support."""
         tools = await list_tools()
         cw = next(t for t in tools if t.name == "tp_create_workout")
-        props = cw.inputSchema["properties"]
+        props = cw.input_schema["properties"]
         assert "distance_km" in props
         assert "tss_planned" in props
         assert "structured_workout" in props
-        assert "distance_km" not in cw.inputSchema["required"]
-        assert "tss_planned" not in cw.inputSchema["required"]
-        assert "structured_workout" not in cw.inputSchema["required"]
+        assert "is_hidden" in props
+        assert "distance_km" not in cw.input_schema["required"]
+        assert "tss_planned" not in cw.input_schema["required"]
+        assert "structured_workout" not in cw.input_schema["required"]
+        assert "is_hidden" not in cw.input_schema["required"]
+        assert props["is_hidden"]["default"] is False
 
     @pytest.mark.asyncio
     async def test_update_workout_schema_includes_structured_workout(self):
         tools = await list_tools()
         uw = next(t for t in tools if t.name == "tp_update_workout")
-        props = uw.inputSchema["properties"]
+        props = uw.input_schema["properties"]
         assert "structure" in props
         assert "structured_workout" in props
+        assert "is_hidden" in props
 
     @pytest.mark.asyncio
     async def test_workout_tools_schema_advertises_datetime_dates(self):
@@ -135,8 +161,20 @@ class TestListTools:
         create_tool = next(t for t in tools if t.name == "tp_create_workout")
         update_tool = next(t for t in tools if t.name == "tp_update_workout")
 
-        assert "YYYY-MM-DDTHH:MM:SS" in create_tool.inputSchema["properties"]["date"]["description"]
-        assert "YYYY-MM-DDTHH:MM:SS" in update_tool.inputSchema["properties"]["date"]["description"]
+        assert "YYYY-MM-DDTHH:MM:SS" in create_tool.input_schema["properties"]["date"]["description"]
+        assert "YYYY-MM-DDTHH:MM:SS" in update_tool.input_schema["properties"]["date"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_workout_feedback_schema_describes_ranges(self):
+        """Create/update workout schemas should document subjective feedback ranges."""
+        tools = await list_tools()
+        create_tool = next(t for t in tools if t.name == "tp_create_workout")
+        update_tool = next(t for t in tools if t.name == "tp_update_workout")
+
+        for tool in (create_tool, update_tool):
+            props = tool.input_schema["properties"]
+            assert props["feeling"]["description"] == "TrainingPeaks feeling value (0-10)."
+            assert props["rpe"]["description"] == "Rating of perceived exertion (RPE), 0-10."
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +424,37 @@ class TestCreateWorkoutDispatch:
         payload = mock_instance.post.call_args[1]["json"]
         assert "distancePlanned" not in payload
         assert "tssPlanned" not in payload
+
+    @pytest.mark.asyncio
+    async def test_hidden_reaches_api_payload(self):
+        """The public is_hidden argument should map to TrainingPeaks isHidden."""
+        create_response = APIResponse(
+            success=True,
+            data={"workoutId": 9004, "title": "Hidden Run", "workoutDay": "2026-01-10T00:00:00"},
+        )
+
+        with patch("tp_mcp.tools.workouts.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.post = AsyncMock(return_value=create_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = _parse_result(
+                await call_tool(
+                    "tp_create_workout",
+                    {
+                        "date": "2026-01-10",
+                        "sport": "Run",
+                        "title": "Hidden Run",
+                        "duration_minutes": 45,
+                        "is_hidden": True,
+                    },
+                )
+            )
+
+        assert result["success"] is True
+        payload = mock_instance.post.call_args[1]["json"]
+        assert payload["isHidden"] is True
 
     @pytest.mark.asyncio
     async def test_datetime_date_reaches_api_payload(self):

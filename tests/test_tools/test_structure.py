@@ -286,3 +286,133 @@ class TestTpValidateStructure:
 
         assert result["isError"] is True
         assert result["error_code"] == "VALIDATION_ERROR"
+
+
+class TestDistanceWorkout:
+    """Distance-based (swim/track) structures."""
+
+    def _swim_structure(self) -> SimpleWorkoutStructure:
+        warmup = SimpleStep(
+            name="Warm up", distance_value=200, distance_unit="meter",
+            intensity_min=40, intensity_max=50, intensityClass="warmUp",
+        )
+        active = SimpleStep(
+            name="Active", distance_value=100, distance_unit="meter",
+            intensity_min=70, intensity_max=80, intensityClass="active",
+        )
+        rest = SimpleStep(
+            name="Recovery", duration_seconds=10,
+            intensity_min=70, intensity_max=80, intensityClass="rest",
+        )
+        reps = SimpleRepetitionBlock(reps=4, steps=[active, rest])
+        cooldown = SimpleStep(
+            name="Cool down", distance_value=100, distance_unit="meter",
+            intensity_min=40, intensity_max=50, intensityClass="coolDown",
+        )
+        return SimpleWorkoutStructure(
+            primaryIntensityMetric="percentOfThresholdPace",
+            primaryLengthMetric="distance",
+            distance_unit="meter",
+            steps=[warmup, reps, cooldown],
+        )
+
+    def test_top_level_fields(self):
+        wire = build_wire_structure(self._swim_structure())
+
+        assert wire["primaryLengthMetric"] == "distance"
+        assert wire["primaryIntensityMetric"] == "percentOfThresholdPace"
+        assert wire["primaryIntensityTargetOrRange"] == "range"
+        assert wire["visualizationDistanceUnit"] == "meter"
+
+    def test_cumulative_begin_end_only_distance_steps_count(self):
+        wire = build_wire_structure(self._swim_structure())
+        blocks = wire["structure"]
+
+        assert len(blocks) == 3
+
+        # Warmup: 200m
+        assert blocks[0]["begin"] == 0
+        assert blocks[0]["end"] == 200
+
+        # Reps: 4 x 100m active (+ 10s rest which does NOT contribute)
+        assert blocks[1]["begin"] == 200
+        assert blocks[1]["end"] == 600
+
+        # Cooldown: 100m
+        assert blocks[2]["begin"] == 600
+        assert blocks[2]["end"] == 700
+
+    def test_rest_step_uses_second_unit_inside_distance_workout(self):
+        wire = build_wire_structure(self._swim_structure())
+        rep_block = wire["structure"][1]
+
+        assert rep_block["type"] == "repetition"
+        assert rep_block["length"] == {"value": 4, "unit": "repetition"}
+
+        inner = rep_block["steps"]
+        assert inner[0]["name"] == "Active"
+        assert inner[0]["length"] == {"value": 100, "unit": "meter"}
+        assert inner[1]["name"] == "Recovery"
+        assert inner[1]["length"] == {"value": 10, "unit": "second"}
+
+    def test_single_distance_step_outer_length_mirrors_inner(self):
+        wire = build_wire_structure(self._swim_structure())
+
+        warmup_block = wire["structure"][0]
+        assert warmup_block["type"] == "step"
+        assert warmup_block["length"] == {"value": 200, "unit": "meter"}
+        assert warmup_block["steps"][0]["length"] == {"value": 200, "unit": "meter"}
+
+        cooldown_block = wire["structure"][2]
+        assert cooldown_block["length"] == {"value": 100, "unit": "meter"}
+
+    def test_missing_distance_unit_when_distance_metric_raises(self):
+        step = SimpleStep(
+            name="x", distance_value=100, distance_unit="meter",
+            intensity_min=50, intensity_max=60, intensityClass="active",
+        )
+        with pytest.raises(Exception):
+            SimpleWorkoutStructure(
+                primaryLengthMetric="distance",
+                steps=[step],
+            )
+
+    def test_step_requires_duration_or_distance(self):
+        with pytest.raises(Exception):
+            SimpleStep(
+                name="Bad",
+                intensity_min=50, intensity_max=60, intensityClass="active",
+            )
+
+    def test_step_cannot_specify_both_length_types(self):
+        with pytest.raises(Exception):
+            SimpleStep(
+                name="Bad", duration_seconds=60,
+                distance_value=100, distance_unit="meter",
+                intensity_min=50, intensity_max=60, intensityClass="active",
+            )
+
+    def test_invalid_distance_unit_raises(self):
+        with pytest.raises(Exception):
+            SimpleStep(
+                name="Bad", distance_value=100, distance_unit="furlong",
+                intensity_min=50, intensity_max=60, intensityClass="active",
+            )
+
+    def test_parse_from_dict_round_trip(self):
+        data = {
+            "primaryLengthMetric": "distance",
+            "primaryIntensityMetric": "percentOfThresholdPace",
+            "distance_unit": "meter",
+            "steps": [
+                {"name": "WU", "distance_value": 200, "distance_unit": "meter",
+                 "intensity_min": 40, "intensity_max": 50, "intensityClass": "warmUp"},
+            ],
+        }
+        parsed = parse_structure_input(data)
+        assert parsed.primaryLengthMetric == "distance"
+        assert parsed.distance_unit == "meter"
+
+        wire = build_wire_structure(parsed)
+        assert wire["visualizationDistanceUnit"] == "meter"
+        assert wire["structure"][0]["length"] == {"value": 200, "unit": "meter"}

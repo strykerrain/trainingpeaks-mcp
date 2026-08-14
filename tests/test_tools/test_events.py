@@ -18,6 +18,7 @@ from tp_mcp.tools.events import (
     tp_get_note,
     tp_get_note_comments,
     tp_list_notes,
+    tp_update_event,
     tp_update_note,
 )
 
@@ -63,6 +64,104 @@ class TestGetNextEvent:
             result = await tp_get_next_event()
 
         assert result["event"]["name"] == "Local 10K"
+
+
+class TestEventDistanceNormalisation:
+    """Event tools inject a canonical distance_km alongside TP's raw
+    distance/distanceUnits, which vary per athlete for the same race (#71)."""
+
+    @staticmethod
+    async def _next_event_result(data):
+        response = APIResponse(success=True, data=data)
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            return await tp_get_next_event()
+
+    @pytest.mark.asyncio
+    async def test_meters_units(self):
+        result = await self._next_event_result(
+            {"name": "50K", "distance": 50000, "distanceUnits": "Meters"}
+        )
+        assert result["event"]["distance_km"] == 50.0
+        # Raw fields untouched
+        assert result["event"]["distance"] == 50000
+        assert result["event"]["distanceUnits"] == "Meters"
+
+    @pytest.mark.asyncio
+    async def test_kilometers_units(self):
+        result = await self._next_event_result(
+            {"name": "50K", "distance": 50, "distanceUnits": "Kilometers"}
+        )
+        assert result["event"]["distance_km"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_blank_units_large_value_assumed_meters(self):
+        result = await self._next_event_result(
+            {"name": "50K", "distance": 50000, "distanceUnits": ""}
+        )
+        assert result["event"]["distance_km"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_null_units_small_value_assumed_km(self):
+        result = await self._next_event_result(
+            {"name": "50K", "distance": 50, "distanceUnits": None}
+        )
+        assert result["event"]["distance_km"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_missing_distance(self):
+        result = await self._next_event_result({"name": "No distance"})
+        assert result["event"]["distance_km"] is None
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_distance(self):
+        result = await self._next_event_result(
+            {"name": "Bad data", "distance": "n/a", "distanceUnits": "Kilometers"}
+        )
+        assert result["event"]["distance_km"] is None
+
+    @pytest.mark.asyncio
+    async def test_miles_units(self):
+        result = await self._next_event_result(
+            {"name": "Marathon", "distance": 26.2, "distanceUnits": "Miles"}
+        )
+        assert result["event"]["distance_km"] == pytest.approx(42.164813, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_focus_event_gets_distance_km(self):
+        response = APIResponse(
+            success=True,
+            data={"name": "IM World Champs", "distance": 226000, "distanceUnits": "Meters"},
+        )
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_get_focus_event()
+
+        assert result["event"]["distance_km"] == 226.0
+
+    @pytest.mark.asyncio
+    async def test_get_events_list_gets_distance_km(self):
+        events = [
+            {"name": "Race A", "distance": 10000, "distanceUnits": "Meters"},
+            {"name": "Race B", "distance": 21.1, "distanceUnits": "Kilometers"},
+        ]
+        response = APIResponse(success=True, data=events)
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=123)
+            mock_instance.get = AsyncMock(return_value=response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_get_events("2026-01-01", "2026-03-01")
+
+        assert [e["distance_km"] for e in result["events"]] == [10.0, 21.1]
 
 
 class TestGetEvents:
@@ -195,13 +294,18 @@ class TestAvailability:
             result = await tp_create_availability(
                 start_date="2026-04-01", end_date="2026-04-07",
                 limited=True, sport_types=["Run", "Swim"],
+                description="Holiday",
             )
 
         assert result["success"] is True
         assert result["limited"] is True
         payload = mock_instance.post.call_args[1]["json"]
-        assert payload["limited"] is True
-        assert payload["sportTypes"] == ["Run", "Swim"]
+        assert payload["personId"] == 123
+        assert payload["type"] == 2
+        assert payload["availableSportTypes"] == [3, 1]
+        assert payload["description"] == "Holiday"
+        assert "athleteId" not in payload
+        assert "limited" not in payload
 
 
 class TestGetNote:
@@ -552,3 +656,68 @@ class TestListNotes:
             result = await tp_list_notes(start_date="2026-05-01", end_date="2026-05-31")
 
         assert result["notes"][0]["date"] is None
+
+
+class TestUpdateEventAttachLegs:
+    """tp_update_event(workout_ids=...) attaches workouts to an event as its legs.
+    TP links them via the event's `workouts` id array (HAR-verified: PUT /event
+    with workouts=[…]; `legs` stays [] and is derived server-side)."""
+
+    @pytest.mark.asyncio
+    async def test_workout_ids_sets_workouts_array(self):
+        existing = {
+            "id": 37493307,
+            "name": "Ironstar Гром олимпийка",
+            "eventDate": "2026-05-30T00:00:00",
+            "eventType": "MultisportTriathlon",
+            "personId": 1680841,
+            "legs": [],
+            "workouts": [3753121100],  # one leg already attached
+        }
+        get_response = APIResponse(success=True, data=[existing])
+        put_response = APIResponse(success=True, data={})
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=1680841)
+            mock_instance.get = AsyncMock(return_value=get_response)
+            mock_instance.put = AsyncMock(return_value=put_response)
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_update_event(
+                event_id="37493307",
+                workout_ids=[3753121100, 3763855286, 3753121299, 3753122444],
+            )
+
+        assert result["success"] is True
+        payload = mock_instance.put.call_args.kwargs["json"]
+        assert payload["workouts"] == [3753121100, 3763855286, 3753121299, 3753122444]
+        assert payload["legs"] == []          # legs untouched — TP derives them
+
+    @pytest.mark.asyncio
+    async def test_string_workout_ids_are_coerced_to_int(self):
+        existing = {"id": 1, "personId": 9, "legs": [], "workouts": []}
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=9)
+            mock_instance.get = AsyncMock(return_value=APIResponse(success=True, data=[existing]))
+            mock_instance.put = AsyncMock(return_value=APIResponse(success=True, data={}))
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            result = await tp_update_event(event_id="1", workout_ids=["10", "20"])
+
+        assert result["success"] is True
+        assert mock_instance.put.call_args.kwargs["json"]["workouts"] == [10, 20]
+
+    @pytest.mark.asyncio
+    async def test_workout_ids_omitted_leaves_workouts_untouched(self):
+        existing = {"id": 1, "personId": 9, "legs": [], "workouts": [55]}
+        with patch("tp_mcp.tools.events.TPClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.ensure_athlete_id = AsyncMock(return_value=9)
+            mock_instance.get = AsyncMock(return_value=APIResponse(success=True, data=[existing]))
+            mock_instance.put = AsyncMock(return_value=APIResponse(success=True, data={}))
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            await tp_update_event(event_id="1", description="just a note")
+
+        assert mock_instance.put.call_args.kwargs["json"]["workouts"] == [55]

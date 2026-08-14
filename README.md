@@ -23,7 +23,7 @@ Ask your AI assistant things like:
 - "Set my FTP to 310 and update my power zones"
 - "Add a calendar note for next Monday: rest day, travel"
 
-## Tools (64)
+## Tools (84)
 
 ### Workouts
 | Tool | Description |
@@ -60,11 +60,27 @@ Ask your AI assistant things like:
 | Tool | Description |
 |------|-------------|
 | `tp_get_athlete_settings` | Get FTP, thresholds, zones, profile |
-| `tp_update_ftp` | Update FTP and recalculate the default power zones |
-| `tp_update_hr_zones` | Update heart rate zones |
-| `tp_update_speed_zones` | Update run/swim pace zones |
+| `tp_update_ftp` | Update FTP for a sport's power set (bike default; preserves the set's calculation method) |
+| `tp_update_hr_zones` | Update HR threshold/max/resting for a sport (general/bike/run/swim), preserving the method |
+| `tp_update_speed_zones` | Update run/swim threshold pace, preserving the method |
+| `tp_create_zones` | Create a NEW per-sport zone set from scratch (choose the calculation method); errors if one already exists |
+| `tp_get_zone_methods` | List available zone-calculation methods per metric (power/HR/pace) with each method's zone count and labels |
 | `tp_update_nutrition` | Update daily planned calories |
 | `tp_get_pool_length_settings` | Get pool length options |
+
+**Zone updates — how they work & one limitation.** The zone setters target the
+right per-sport zone set (by `workoutTypeId`) and recompute the bands with
+**TrainingPeaks' own zone calculator** (the same call the web UI's *Calculate*
+makes), so the athlete's calculation method (%LTHR, Karvonen, Andy Coggan, …) is
+honoured exactly. They update a **threshold** (FTP / LTHR / threshold pace).
+
+> **Limitation — test-based (Distance/Time) methods.** A zone set whose method
+> *derives* its threshold from a test result (Speed/Pace **Distance / Time**)
+> cannot have a threshold set directly — there is no stable value to set. These
+> tools detect that case and return `TEST_BASED_METHOD` (writing nothing) rather
+> than storing a wrong threshold; configure such a set via a test in the
+> TrainingPeaks UI. This is deliberate: the connector owns threshold-anchored
+> zones; test-protocol setup stays in the UI.
 
 ### Health Metrics
 | Tool | Description |
@@ -88,9 +104,10 @@ Ask your AI assistant things like:
 | `tp_get_next_event` | Get nearest future event |
 | `tp_get_events` | List events in a date range |
 | `tp_create_event` | Add a race/event with priority (A/B/C) and CTL target |
-| `tp_update_event` | Update event details |
+| `tp_update_event` | Update event details, attach workouts as legs (multisport) |
 | `tp_delete_event` | Delete an event |
 | `tp_create_note` | Create a calendar note |
+| `tp_list_notes` | List calendar notes for a date range |
 | `tp_get_note` | Get a calendar note by ID |
 | `tp_update_note` | Update title, description, date or visibility of a note |
 | `tp_delete_note` | Delete a calendar note |
@@ -110,7 +127,37 @@ Ask your AI assistant things like:
 | `tp_delete_library` | Delete a library folder |
 | `tp_create_library_item` | Save a workout template |
 | `tp_update_library_item` | Edit a template |
-| `tp_schedule_library_workout` | Schedule a template to a calendar date |
+| `tp_schedule_library_workout` | Schedule a template to a calendar date, for one athlete or (coach accounts) several at once via `athletes` |
+
+### Strength Workouts
+| Tool | Description |
+|------|-------------|
+| `tp_search_exercises` | Search the built-in strength exercise library by name (offline) |
+| `tp_create_strength_workout` | Create a structured strength/gym workout (blocks of exercises with sets and parameters) |
+| `tp_get_strength_summary` | Get a strength workout's compliance summary (blocks/prescriptions/sets completed) |
+| `tp_get_strength_workouts` | List strength/gym workouts in a date range (they don't appear in `tp_get_workouts`) |
+| `tp_get_strength_workout` | Get a strength workout's full detail: blocks, exercises, sets, prescribed vs executed weights |
+| `tp_update_strength_workout` | Update a strength workout in place (replace/append blocks, retitle, mark complete) - preserves Garmin TSS and FIT files, so use this rather than delete-and-recreate on device-synced workouts |
+| `tp_delete_strength_workout` | Delete a strength workout by ID |
+
+### Athlete Groups (coach accounts)
+| Tool | Description |
+|------|-------------|
+| `tp_list_groups` | List the coach's athlete groups (TP tags) |
+| `tp_list_athletes_in_group` | List the athletes in one group, with names resolved from the roster |
+| `tp_create_group` | Create a new athlete group |
+| `tp_rename_group` | Rename an athlete group (default group cannot be renamed) |
+| `tp_delete_group` | Delete a group - the grouping only, athletes are not deleted |
+| `tp_add_athletes_to_group` | Add one or more athletes to a group |
+| `tp_remove_athletes_from_group` | Remove one or more athletes from a group |
+
+### Training Plans (multi-week)
+| Tool | Description |
+|------|-------------|
+| `tp_list_training_plans` | List the coach's authored multi-week training plans |
+| `tp_get_training_plan` | Summary of one plan: weeks, per-week duration/distance, sport breakdown |
+| `tp_get_training_plan_workouts` | All workouts of a plan laid out by week/day |
+| `tp_apply_training_plan` | Apply a plan to an athlete's calendar from a start date (safe synthetic copy) |
 
 ### Reference & Auth
 | Tool | Description |
@@ -122,6 +169,25 @@ Ask your AI assistant things like:
 | `tp_refresh_auth` | Re-authenticate from browser cookie |
 
 ---
+
+## MCP Apps (inline charts)
+
+On clients that support the MCP Apps extension (spec 2026-07-28), some tools render an
+interactive UI inline in the conversation as well as returning their normal text payload.
+On every other client the tools behave exactly as before - the text answer is always
+complete on its own.
+
+![PMC fitness chart rendered inline](docs/images/pmc-chart-app.png)
+
+| Tool | App |
+|------|-----|
+| `tp_get_fitness` | Interactive CTL/ATL/TSB performance-management chart |
+| `tp_get_weekly_summary` | Week card: per-day load bars, planned vs completed, totals |
+| `tp_get_workout` | Interval-profile viewer for structured workouts (summary fallback otherwise) |
+
+*(Note: as of July 2026, Claude clients still connect to local stdio servers over the
+pre-2026 protocol, so the apps ship ready but won't render until client support rolls
+out. The tools' text output is unaffected either way.)*
 
 ## Setup Options
 
@@ -154,7 +220,7 @@ pip install -e .
 If you're logged into TrainingPeaks in your browser:
 
 ```bash
-pip install tp-mcp[browser]  # One-time: install browser support
+pip install -e ".[browser]"  # One-time: install browser support
 tp-mcp auth --from-browser chrome  # Or: firefox, safari, edge, auto
 ```
 
@@ -166,6 +232,21 @@ tp-mcp auth --from-browser chrome  # Or: firefox, safari, edge, auto
 2. Open DevTools (`F12`) -> **Application** tab -> **Cookies**
 3. Find `Production_tpAuth` and copy its value
 4. Run `tp-mcp auth` and paste when prompted
+
+**Option C: Environment variable (headless servers, containers, CI)**
+
+Set the `TP_AUTH_COOKIE` environment variable to your `Production_tpAuth` cookie value (obtained as in Option B):
+
+```bash
+export TP_AUTH_COOKIE="<Production_tpAuth value>"
+tp-mcp serve
+```
+
+Or in your MCP client config, add it under the server's `env` block. This is a **supported, first-class auth method**, not a testing-only override - it is the recommended path wherever the keyring and encrypted-file backends don't work: headless Linux boxes without Secret Service, containers that are rebuilt (the encrypted file's key is derived from a machine-specific salt, so it doesn't survive a rebuild), and CI.
+
+Precedence: `TP_AUTH_COOKIE` is always checked **first**, before the system keyring, then the encrypted file, so setting it overrides any stored credential.
+
+> **Security note:** the cookie grants full access to your TrainingPeaks account, so treat `TP_AUTH_COOKIE` like a password. Inject it from a secrets manager or your orchestrator's secret mechanism - never hard-code it in Dockerfiles, compose files, or anything committed to git. Be aware that environment variables are readable by any process running as the same user, and via `docker inspect`. On desktop setups, the keyring/encrypted-file storage (Options A and B) remains the recommended default; `TP_AUTH_COOKIE` is for headless and container use.
 
 **Other auth commands:**
 ```bash
@@ -367,6 +448,19 @@ pytest tests/ -v
 mypy src/
 ruff check src/
 ```
+
+### Adding a tool
+
+Every tool automatically gets a display title and behaviour annotations
+(`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`),
+derived from its name by the metadata block at the bottom of
+`src/tp_mcp/server.py`. Name your tool by the conventions
+(`tp_get_*`/`tp_list_*` for reads, `tp_delete_*` for destructive removals,
+`tp_create_*`/`tp_add_*` for creates) and it needs nothing extra; if it
+doesn't fit the conventions, add it to the exception sets next to that block
+(`_DESTRUCTIVE_TOOLS`, `_NON_IDEMPOTENT_WRITES`, `_READ_ONLY_EXTRA`,
+`_TITLE_OVERRIDES`). `tests/test_tool_metadata.py` fails with instructions if
+a tool is misclassified, and the README tool tables above should gain a row.
 
 ## Licence
 
