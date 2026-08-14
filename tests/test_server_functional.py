@@ -114,8 +114,6 @@ class TestListTools:
             "tp_unpair_workout",
             "tp_set_workout_note",
             "tp_get_workout_note",
-            "tp_search_exercises",
-            "tp_create_strength_workout",
             "tp_get_strength_summary",
             "tp_get_strength_workouts",
             "tp_get_strength_workout",
